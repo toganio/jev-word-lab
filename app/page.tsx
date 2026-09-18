@@ -19,6 +19,7 @@ import {
   FlaskConical,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -31,6 +32,8 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { buildTree, commonWords, categoryLabel } from '@/lib/dictionary';
 import { generate, classifyWords } from '@/lib/engine';
+import { RunRecorder, type SaveStatus } from '@/lib/recorder';
+import { APP_VERSION, type RunStatus } from '@/lib/run-record';
 import { validateResponse } from '@/lib/protocol';
 import { registerLabTools } from '@/lib/webmcp';
 import type {
@@ -99,11 +102,15 @@ export default function Home() {
   const [operations, setOperations] = useState<Operation[]>([]),
     [monitorTab, setMonitorTab] = useState('monitor');
   const operationId = useRef(0);
+  const recording = useRef<RunRecorder | null>(null);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus | null>(null);
+  const [recordId, setRecordId] = useState('');
   const [key, setKey] = useState(''),
     [connected, setConnected] = useState(false),
     [checking, setChecking] = useState(false);
   const [dict, setDict] = useState<Dictionary | null>(null),
     [loadError, setLoadError] = useState('');
+  const [repetitionGuard, setRepetitionGuard] = useState(true);
   const [prompt, setPrompt] = useState('How do I make a good cup of tea?');
   const [limit, setLimit] = useState('0'),
     [beam, setBeam] = useState('3'),
@@ -175,7 +182,50 @@ export default function Home() {
   const updateStats = (patch: Partial<Stats>) => {
     statsRef.current = { ...statsRef.current, ...patch };
     setStats(statsRef.current);
+    recording.current?.patch({ usage: statsRef.current });
   };
+  function beginRecording(
+    kind: 'conversation' | 'classification',
+    question: string,
+    conversation: Message[],
+  ) {
+    const id = crypto.randomUUID();
+    setRecordId(id);
+    setSaveStatus('saving');
+    recording.current = new RunRecorder(
+      {
+        id,
+        revision: 0,
+        kind,
+        startedAt: Date.now(),
+        status: 'running',
+        question,
+        answer: '',
+        reason: 'Başladı',
+        appVersion: APP_VERSION,
+        settings: {
+          limit: Number(limit),
+          beam: Number(beam),
+          maxWords: Number(maxWords),
+          requestBudget: Number(budget),
+          repetitionGuard,
+        },
+        conversation: conversation.slice(-10),
+        steps: [],
+        operations: [],
+        usage: statsRef.current,
+      },
+      setSaveStatus,
+    );
+  }
+  function logOperation(operation: Operation) {
+    setOperations((old) =>
+      old.some((o) => o.id === operation.id)
+        ? old.map((o) => (o.id === operation.id ? operation : o))
+        : [...old.slice(-399), operation],
+    );
+    recording.current?.operation(operation);
+  }
   const evaluate: Evaluate = async (state, questions, signal) => {
     signal.throwIfAborted();
     if (statsRef.current.requests >= Number(budget))
@@ -193,22 +243,20 @@ export default function Home() {
           : entries[0][1].instructions.includes('Group: English dictionary')
             ? 'Kategori seçimi'
             : 'Alt grup seçimi';
-    setOperations((old) => [
-      ...old.slice(-399),
-      {
-        id,
-        label,
-        status: 'pending',
-        at,
-        ms: 0,
-        questions: entries.length,
-        options: entries.reduce(
-          (n, [, q]) => n + Object.keys(q.criteria).length,
-          0,
-        ),
-        summary: 'Jev yanıtı bekleniyor…',
-      },
-    ]);
+    const operation: Operation = {
+      id,
+      label,
+      status: 'pending',
+      at,
+      ms: 0,
+      questions: entries.length,
+      options: entries.reduce(
+        (n, [, q]) => n + Object.keys(q.criteria).length,
+        0,
+      ),
+      summary: 'Jev yanıtı bekleniyor…',
+    };
+    logOperation(operation);
     try {
       const r = await fetch('/api/decision', {
         method: 'POST',
@@ -244,13 +292,12 @@ export default function Home() {
           )
           .join(' / ') +
         (entries.length > 3 ? ` (+${entries.length - 3} sonuç)` : '');
-      setOperations((old) =>
-        old.map((o) =>
-          o.id === id
-            ? { ...o, status: 'done', ms: Date.now() - at, summary }
-            : o,
-        ),
-      );
+      logOperation({
+        ...operation,
+        status: 'done',
+        ms: Date.now() - at,
+        summary,
+      });
       updateStats({
         inputTokens: statsRef.current.inputTokens + data.usage.input_tokens,
         outputTokens: statsRef.current.outputTokens + data.usage.output_tokens,
@@ -263,18 +310,12 @@ export default function Home() {
         : e instanceof Error
           ? e.message
           : 'İstek başarısız.';
-      setOperations((old) =>
-        old.map((o) =>
-          o.id === id
-            ? {
-                ...o,
-                status: signal.aborted ? 'cancelled' : 'error',
-                ms: Date.now() - at,
-                summary,
-              }
-            : o,
-        ),
-      );
+      logOperation({
+        ...operation,
+        status: signal.aborted ? 'cancelled' : 'error',
+        ms: Date.now() - at,
+        summary,
+      });
       throw e;
     }
   };
@@ -332,6 +373,9 @@ export default function Home() {
     setPrompt('');
     statsRef.current = { ...INITIAL, startedAt: Date.now() };
     setStats(statsRef.current);
+    beginRecording('conversation', history.at(-1)!.content, history);
+    let outcome: RunStatus = 'completed',
+      outcomeReason = '';
     try {
       const root = buildTree(dict, Number(limit), overrides);
       const result = await generate({
@@ -340,14 +384,32 @@ export default function Home() {
         history,
         beam: Number(beam),
         maxWords: Number(maxWords),
+        repetitionGuard,
         signal: c.signal,
         evaluate,
         onPhase: (text, trace) => {
           setPhase(text);
+          recording.current?.patch({ reason: text });
           if (trace) setLiveTrace(trace);
+          if (trace?.excluded?.length) {
+            const id = ++operationId.current;
+            logOperation({
+              id,
+              label: 'Tekrar koruması · uygulama filtresi',
+              status: 'done',
+              at: Date.now(),
+              ms: 0,
+              questions: 0,
+              options: trace.excluded!.length,
+              summary: trace
+                .excluded!.map((x) => `${x.word}: ${x.reason}`)
+                .join(' / '),
+            });
+          }
         },
         onStep: (step, text) => {
           setSteps((s) => [...s, step]);
+          recording.current?.step(step, text);
           setMessages([...history, { role: 'assistant', content: text }]);
           updateStats({
             words: text.split(/\s+/).filter(Boolean).length,
@@ -355,8 +417,15 @@ export default function Home() {
           });
         },
       });
+      outcomeReason = result.reason;
       setPhase(result.reason);
     } catch (e) {
+      outcome = c.signal.aborted ? 'stopped' : 'error';
+      outcomeReason = c.signal.aborted
+        ? 'Kullanıcı durdurdu'
+        : e instanceof Error
+          ? e.message
+          : 'Deneme başarısız';
       if (c.signal.aborted) setPhase('Durduruldu. Kısmi cevap korundu.');
       else {
         setError(e instanceof Error ? e.message : 'Deneme tamamlanamadı.');
@@ -364,6 +433,9 @@ export default function Home() {
       }
     } finally {
       updateStats({ elapsedMs: Date.now() - statsRef.current.startedAt });
+      const recorder = recording.current;
+      recording.current = null;
+      await recorder?.finish(outcome, outcomeReason);
       setRunning(false);
       busy.current = false;
       controller.current = null;
@@ -392,6 +464,13 @@ export default function Home() {
       .slice(0, count)
       .map(([w]) => w);
     let done = 0;
+    beginRecording(
+      'classification',
+      `${words.length} İngilizce kelimeyi sınıflandır`,
+      [],
+    );
+    let outcome: RunStatus = 'completed',
+      outcomeReason = '';
     try {
       if (!words.length) {
         setPhase(
@@ -408,6 +487,9 @@ export default function Home() {
         c.signal,
         (result) => {
           done += Object.keys(result).length;
+          recording.current?.patch({
+            answer: `${done} kelime sınıflandırıldı. Son grup: ${JSON.stringify(result)}`,
+          });
           setOverrides((old) => ({ ...old, ...result }));
           setPhase(
             `Jev ${done} / ${words.length} kelimeyi kategorilere ayırdı.`,
@@ -417,13 +499,23 @@ export default function Home() {
       setPhase(
         `${done} kelime Jev tarafından sınıflandırıldı. Yeni gruplar sonraki denemede kullanılacak.`,
       );
+      outcomeReason = `${done} kelime sınıflandırıldı`;
     } catch (e) {
+      outcome = c.signal.aborted ? 'stopped' : 'error';
+      outcomeReason = c.signal.aborted
+        ? 'Kullanıcı durdurdu'
+        : e instanceof Error
+          ? e.message
+          : 'Sınıflandırma başarısız';
       if (c.signal.aborted)
         setPhase('Sınıflandırma durduruldu. Tamamlanan gruplar korundu.');
       else
         setError(e instanceof Error ? e.message : 'Sınıflandırma başarısız.');
     } finally {
       updateStats({ elapsedMs: Date.now() - statsRef.current.startedAt });
+      const recorder = recording.current;
+      recording.current = null;
+      await recorder?.finish(outcome, outcomeReason);
       setClassifying(false);
       busy.current = false;
       controller.current = null;
@@ -432,12 +524,15 @@ export default function Home() {
   function exportRun() {
     const data = {
       createdAt: new Date().toISOString(),
+      recordId,
+      appVersion: APP_VERSION,
       model: 'jev-latest',
       dictionary: dict?.source,
       settings: {
         limit: Number(limit),
         beam: Number(beam),
         maxWords: Number(maxWords),
+        repetitionGuard,
         requestBudget: Number(budget),
       },
       messages,
@@ -575,6 +670,20 @@ export default function Home() {
             <Button onClick={loadDictionary}>Yeniden yükle</Button>
           </div>
         )}
+        <div className="repetition-control">
+          <Switch
+            id="repeat-guard"
+            checked={repetitionGuard}
+            onCheckedChange={setRepetitionGuard}
+            disabled={isBusy}
+          />
+          <label htmlFor="repeat-guard">Tekrar koruması</label>
+          <span>
+            {repetitionGuard
+              ? 'Tekrar adaylarını uygulama eler; kalanlar arasından Jev seçer.'
+              : 'Ham deney: tekrar adayları elenmez.'}
+          </span>
+        </div>
         <div className="experiment-settings">
           <Picker
             label="Kelime havuzu"
@@ -941,6 +1050,15 @@ export default function Home() {
                             <span>{t.options} seçenek</span>
                           </summary>
                           <p>{t.path}</p>
+                          {t.excluded?.map((item) => (
+                            <div
+                              key={item.word}
+                              className="path-row excluded-row"
+                            >
+                              <span>{item.word}</span>
+                              <span>{item.reason}</span>
+                            </div>
+                          ))}
                           {t.candidates.map((c) => (
                             <div key={c.label} className="path-row">
                               <span>
@@ -1078,6 +1196,22 @@ export default function Home() {
             </button>
           </div>
         </section>
+        <div
+          className={`recording-status ${saveStatus === 'failed' ? 'failed' : ''}`}
+          role="status"
+        >
+          <ShieldCheck size={15} />
+          <span>
+            {saveStatus === 'saving'
+              ? 'Deneme kaydediliyor…'
+              : saveStatus === 'saved'
+                ? 'Deneme kaydedildi · Codex bu kaydı okuyabilir.'
+                : saveStatus === 'failed'
+                  ? 'Kayıt gönderilemedi. Sonucu JSON olarak indirerek saklayabilirsin.'
+                  : 'Yeni denemeler özel sitede otomatik kaydedilir; Codex sonuçları okuyabilir.'}
+          </span>
+          <span>API anahtarı kaydedilmez.</span>
+        </div>
         <footer>
           <span>
             <BookOpen size={15} />

@@ -38,6 +38,7 @@ export type Trace = {
   path: string;
   options: number;
   candidates: Candidate[];
+  excluded?: { word: string; reason: string }[];
 };
 export type Step = {
   index: number;

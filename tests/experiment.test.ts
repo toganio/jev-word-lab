@@ -99,7 +99,7 @@ test('final comparison can pick a word from a weaker category; stop does not lea
   const seen: string[][] = [];
   const evaluate: Evaluate = async (state, qs) => {
     validateRequest({ state, questions: qs });
-    const r = answer(qs, (id, q) => {
+    const r = answer(qs, (id, q): Record<string, number> => {
       if (id === 'next') {
         seen.push(Object.keys(q.criteria));
         return { [finals++ === 0 ? 'water' : STOP]: 1 };
@@ -291,6 +291,183 @@ test('backend rejects a non-Jev upstream result and ignores client model overrid
     );
     assert.equal(res.status, 502);
     assert.match(await res.text(), /yalnızca Jev/);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('repeat guard excludes duplicate words before Jev final choice and logs the rule', async () => {
+  const root = group('root', [word('tea'), word('water')]);
+  let finals = 0;
+  const excluded: string[] = [];
+  const evaluate: Evaluate = async (state, qs) => {
+    validateRequest({ state, questions: qs });
+    return answer(qs, (id, q): Record<string, number> => {
+      if (id === 'next') {
+        if (finals++ === 0) return { tea: 1 };
+        assert.ok(!Object.hasOwn(q.criteria, 'tea'));
+        assert.ok(Object.hasOwn(q.criteria, 'water'));
+        return { [STOP]: 1 };
+      }
+      return { o0: 0.99, o1: 0.01 };
+    });
+  };
+  const result = await generate({
+    root,
+    common: ['the'],
+    history: [],
+    beam: 1,
+    maxWords: 4,
+    signal: new AbortController().signal,
+    evaluate,
+    onPhase: (_p, t) => {
+      excluded.push(...(t?.excluded?.map((x) => x.word) || []));
+    },
+    onStep: () => {},
+  });
+  assert.equal(result.text, 'Tea');
+  assert.ok(excluded.includes('tea'));
+});
+test('raw experiment mode preserves Jev repetitions when guard is disabled', async () => {
+  const root = group('root', [word('tea'), word('water')]);
+  const result = await generate({
+    root,
+    common: ['the'],
+    history: [],
+    beam: 1,
+    maxWords: 3,
+    repetitionGuard: false,
+    signal: new AbortController().signal,
+    evaluate: async (_state, qs) =>
+      answer(
+        qs,
+        (id): Record<string, number> =>
+          id === 'next' ? { tea: 1 } : { o0: 1 },
+      ),
+    onPhase: () => {},
+    onStep: () => {},
+  });
+  assert.equal(result.text, 'Tea tea tea');
+});
+import { repetitionReason } from '../lib/repetition';
+test('guard stops word and phrase loops while allowing normal reuse of function words', () => {
+  const common = new Set(['the', 'is', 'and']);
+  assert.ok(repetitionReason(['Tea', ','], 'tea', common));
+  assert.ok(repetitionReason(['very', 'good', 'very'], 'good', common));
+  assert.ok(
+    repetitionReason(['one', 'two', 'three', 'one', 'two'], 'three', common),
+  );
+  assert.ok(
+    repetitionReason(
+      ['one', 'two', 'three', 'four', 'one', 'two', 'three'],
+      'four',
+      common,
+    ),
+  );
+  assert.ok(
+    repetitionReason(['tea', 'is', 'nice', 'tea', 'is', 'warm'], 'tea', common),
+  );
+  assert.equal(
+    repetitionReason(['the', 'cat', 'and', 'the', 'dog', 'and'], 'the', common),
+    null,
+  );
+  assert.equal(
+    repetitionReason(['tea', 'is', 'nice', 'and'], 'tea', common),
+    null,
+  );
+  assert.ok(repetitionReason(['tea', '.'], '.', common));
+  assert.equal(repetitionReason(['tea'], '?', common), null);
+});
+import { sanitizeRecord, type RunRecord, APP_VERSION } from '../lib/run-record';
+function recordFixture(): RunRecord {
+  return {
+    id: '11111111-1111-4111-8111-111111111111',
+    revision: 1,
+    kind: 'conversation',
+    startedAt: Date.now(),
+    status: 'completed',
+    question: 'Hello?',
+    answer: 'Hello.',
+    reason: 'Complete',
+    appVersion: APP_VERSION,
+    settings: {
+      limit: 0,
+      beam: 3,
+      maxWords: 32,
+      requestBudget: 200,
+      repetitionGuard: true,
+    },
+    conversation: [],
+    steps: [],
+    operations: [],
+    usage: {
+      requests: 2,
+      inputTokens: 50,
+      outputTokens: 2,
+      words: 1,
+      startedAt: Date.now(),
+      elapsedMs: 100,
+    },
+  };
+}
+test('saved snapshots strip API keys, headers and unknown fields recursively', () => {
+  const fixture = recordFixture();
+  const secret = 'never-store-this-api-key';
+  const dirty = {
+    ...fixture,
+    apiKey: secret,
+    headers: { Authorization: secret },
+    settings: { ...fixture.settings, key: secret },
+    usage: { ...fixture.usage, key: secret },
+    operations: [
+      {
+        id: 1,
+        label: 'API',
+        status: 'done',
+        at: 1,
+        ms: 1,
+        questions: 1,
+        options: 2,
+        summary: 'Finished',
+        apiKey: secret,
+      },
+    ],
+  };
+  const saved = sanitizeRecord(dirty);
+  assert.ok(!JSON.stringify(saved).includes(secret));
+  assert.equal(saved.answer, 'Hello.');
+  assert.equal(saved.operations.length, 1);
+  assert.throws(() => sanitizeRecord({ ...fixture, id: 'invalid' }));
+  assert.throws(() => sanitizeRecord({ ...fixture, status: 'unknown' }));
+});
+import { RunRecorder } from '../lib/recorder';
+test('recorder saves final answer after an in-flight checkpoint without losing its terminal status', async () => {
+  const original = globalThis.fetch;
+  const sent: RunRecord[] = [];
+  const states: string[] = [];
+  let release: () => void = () => {};
+  try {
+    globalThis.fetch = (async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      if (sent.length === 1)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      return Response.json({ saved: true });
+    }) as typeof fetch;
+    const fixture = recordFixture();
+    fixture.status = 'running';
+    fixture.answer = '';
+    const recorder = new RunRecorder(fixture, (s) => states.push(s));
+    recorder.patch({ answer: 'The final answer.' });
+    const finish = recorder.finish('completed', 'Jev finished');
+    release();
+    await finish;
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].answer, 'The final answer.');
+    assert.equal(sent[1].status, 'completed');
+    assert.ok(sent[1].revision > sent[0].revision);
+    assert.equal(states.at(-1), 'saved');
   } finally {
     globalThis.fetch = original;
   }

@@ -1115,3 +1115,42 @@ footer a {
     font-size: 13px;
   }
 }
+.repetition-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 19px;
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+.repetition-control label {
+  font-weight: 600;
+  cursor: pointer;
+}
+.repetition-control > span {
+  color: #697e72;
+  font-size: 12px;
+}
+.excluded-row {
+  color: #ad7941;
+}
+.excluded-row > span:last-child {
+  font-size: 11px;
+  text-align: right;
+}
+.recording-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #587862;
+  padding: 12px 2px;
+}
+.recording-status > span:last-child {
+  margin-left: auto;
+  color: #819086;
+}
+.recording-status.failed {
+  color: #ad4e3d;
+}
