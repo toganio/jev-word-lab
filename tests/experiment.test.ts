@@ -1383,26 +1383,8 @@ test('request cancellation bounds a response body that never settles and does no
 import {
   inflectedCandidates,
   expandCandidates,
-  reviewGrammar,
+  GRAMMAR_GUIDANCE,
 } from '../lib/grammar';
-import { compactChildren } from '../lib/dictionary';
-
-test('compacting nested prefixes preserves words and removes serial decisions', () => {
-  const original = [
-    group('a', [
-      group('ab', [word('able'), word('about')]),
-      group('ac', [word('act'), word('acid')]),
-    ]),
-    group('b', [word('book'), word('boil')]),
-  ];
-  const compact = compactChildren(original);
-  assert.deepEqual(
-    new Set(compact.map((n) => (n.kind === 'word' ? n.word : 'group'))),
-    new Set(['able', 'about', 'act', 'acid', 'book', 'boil']),
-  );
-  assert.equal(compact.length, 6);
-});
-
 function grammaticalMap(entries: [string, number, number][]): CategoryMap {
   return Object.fromEntries(
     entries.map(([w, type, inflection]) => {
@@ -1450,7 +1432,7 @@ test('missing plurals and verb forms are candidates only, and remain bounded', (
   );
 });
 
-test('parallel Jev validity decisions exclude invalid grammar and premature stopping before final selection', async () => {
+test('grammar guidance preserves stop and lets Jev select inflections without independent veto calls', async () => {
   const root = group('root', [word('animal'), word('cat')]);
   const prepared = grammaticalMap([
     ['animal', 1, 1],
@@ -1458,23 +1440,23 @@ test('parallel Jev validity decisions exclude invalid grammar and premature stop
   ]);
   const sequence = ['they', 'are', 'animals', STOP];
   let index = 0,
-    grammarCalls = 0;
+    calls = 0;
   const evaluate: Evaluate = async (state: any, qs) => {
+    calls++;
     validateRequest({ state, questions: qs });
-    assert.ok(JSON.stringify({ state, questions: qs }).length < 90000);
-    if (Object.keys(qs)[0].startsWith('v')) {
-      grammarCalls++;
-      return answer(qs, (_id, q) => ({
-        [q.instructions.includes('exactly "animal"') ||
-        (q.instructions.startsWith('Does reply') && index < 3)
-          ? 'reject'
-          : 'allow']: 1,
-      }));
-    }
+    assert.ok(!Object.keys(qs).some((id) => id.startsWith('v')));
+    assert.equal(state.reply_is_new_assistant_sentence, index === 0);
     if (qs.next) {
-      assert.ok(!Object.hasOwn(qs.next.criteria, 'animal'));
-      if (index < 3) assert.ok(!Object.hasOwn(qs.next.criteria, STOP));
-      assert.ok(Object.hasOwn(qs.next.criteria, sequence[index]));
+      assert.equal(Object.hasOwn(qs.next.criteria, STOP), index > 0);
+      assert.ok(qs.next.instructions.includes(GRAMMAR_GUIDANCE));
+      assert.ok(Object.hasOwn(qs.next.criteria, 'animal'));
+      if (index < 3) assert.ok(Object.hasOwn(qs.next.criteria, 'animals'));
+      if (index < 3)
+        assert.ok(
+          qs.next.criteria.animals
+            ?.toLowerCase()
+            .includes(index === 2 ? 'they are animals' : 'animals'),
+        );
       return answer(qs, () => ({ [sequence[index++]]: 1 }));
     }
     return answer(qs, () => ({ o0: 0.9, o1: 0.1 }));
@@ -1493,10 +1475,20 @@ test('parallel Jev validity decisions exclude invalid grammar and premature stop
     onStep: () => {},
   });
   assert.equal(result.text, 'They are animals');
-  assert.equal(grammarCalls, 4);
+  assert.equal(result.reason, 'Jev ended the reply');
+  assert.equal(calls, 8); // one routing and one final comparison per step
 });
 
-test('grammar rejection fails closed and does not emit an assistant-authored substitute', async () => {
+test('grammar guidance does not discard lower-ranked base words to make room for inflections', () => {
+  const bases = Array.from({ length: 120 }, (_, i) => 'base' + i);
+  const common = Array.from({ length: 110 }, (_, i) => 'common' + i);
+  const expanded = expandCandidates(bases, common, {});
+  assert.ok(bases.every((word) => expanded.includes(word)));
+  assert.ok(common.every((word) => expanded.includes(word)));
+  assert.ok(expanded.length + 7 <= 255);
+});
+
+test('a failed Jev final choice cannot produce a substitute answer', async () => {
   let emitted = false;
   await assert.rejects(
     generate({
@@ -1507,48 +1499,18 @@ test('grammar rejection fails closed and does not emit an assistant-authored sub
       maxWords: 2,
       grammarReview: true,
       signal: new AbortController().signal,
-      evaluate: async (_state, qs) =>
-        answer(
-          qs,
-          (id): Record<string, number> =>
-            id.startsWith('v') ? { reject: 1 } : { o0: 1 },
-        ),
+      evaluate: async (_state, qs) => {
+        if (qs.next) throw new Error('Jev unavailable');
+        return answer(qs, () => ({ o0: 1 }));
+      },
       onPhase: () => {},
       onStep: () => {
         emitted = true;
       },
     }),
-    /too few grammatical/,
+    /Jev unavailable/,
   );
   assert.equal(emitted, false);
-});
-
-test('grammar batch supports all 255 candidates in one bounded request and respects cancellation', async () => {
-  const candidates = Array.from(
-    { length: 254 },
-    (_, i) => 'candidate' + i,
-  ).concat(STOP);
-  let calls = 0;
-  const evaluate: Evaluate = async (state, qs) => {
-    calls++;
-    validateRequest({ state, questions: qs });
-    assert.ok(
-      Buffer.byteLength(JSON.stringify({ state, questions: qs })) < 90000,
-    );
-    return answer(qs, () => ({ allow: 1 }));
-  };
-  const reviewed = await reviewGrammar(
-    { reply_so_far: 'They are animals.' },
-    candidates,
-    evaluate,
-    new AbortController().signal,
-  );
-  assert.equal(reviewed.allowed.size, 255);
-  assert.equal(calls, 1);
-  const c = new AbortController();
-  c.abort();
-  await assert.rejects(reviewGrammar({}, candidates, evaluate, c.signal));
-  assert.equal(calls, 1);
 });
 
 test('old category files remain compatible after translating presentation labels, but semantic changes are rejected', () => {
@@ -1666,4 +1628,79 @@ test('a failed later saved page cannot silently replace a known session with the
     }),
     /Could not load the saved/,
   );
+});
+
+test('restored prefix routing preserves the complete saved Jev map and option limits', () => {
+  const file = JSON.parse(
+    fs.readFileSync('data/jev-category-map-36-complete.json', 'utf8'),
+  );
+  const tree = buildPreparedTree(dictionary, 0, file.categories);
+  const words = new Set<string>();
+  let memberships = 0;
+  const visit = (node: Node) => {
+    if (node.kind === 'word') {
+      words.add(node.word);
+      memberships++;
+      return;
+    }
+    assert.ok(node.children.length <= 255);
+    assert.ok(
+      !node.label.includes(' … '),
+      'No balanced alphabetical range should remain',
+    );
+    if (node.children.every((child) => child.kind === 'word'))
+      assert.ok(node.children.length <= 200);
+    node.children.forEach(visit);
+  };
+  visit(tree);
+  assert.equal(words.size, dictionary.count);
+  assert.equal(memberships, 4371270);
+});
+
+test('three-sentence mode stops at the third Jev-selected sentence boundary and preserves early ending', async () => {
+  async function run(sequence: string[]) {
+    let index = 0;
+    return generate({
+      root: group('root', ['cats', 'purr', 'play', 'sleep'].map(word)),
+      common: ['they'],
+      history: [{ role: 'user', content: 'Tell me about cats.' }],
+      beam: 1,
+      maxWords: 32,
+      targetSentences: 3,
+      grammarReview: true,
+      signal: new AbortController().signal,
+      evaluate: async (state: any, qs) => {
+        validateRequest({ state, questions: qs });
+        assert.equal(state.target_sentences, 3);
+        assert.equal(
+          state.sentences_completed,
+          sequence.slice(0, index).filter((w) => w === '.').length,
+        );
+        if (qs.next) {
+          if (index > 0) assert.ok(Object.hasOwn(qs.next.criteria, STOP));
+          assert.ok(Object.hasOwn(qs.next.criteria, sequence[index]));
+          return answer(qs, () => ({ [sequence[index++]]: 1 }));
+        }
+        return answer(qs, () => ({ o0: 0.4, o1: 0.3, o2: 0.2, o3: 0.1 }));
+      },
+      onPhase: () => {},
+      onStep: () => {},
+    });
+  }
+  const full = await run([
+    'cats',
+    'purr',
+    '.',
+    'they',
+    'play',
+    '.',
+    'they',
+    'sleep',
+    '.',
+  ]);
+  assert.equal(full.text, 'Cats purr. They play. They sleep.');
+  assert.equal(full.reason, 'Sentence target reached');
+  const early = await run(['cats', 'purr', STOP]);
+  assert.equal(early.text, 'Cats purr');
+  assert.equal(early.reason, 'Jev ended the reply');
 });

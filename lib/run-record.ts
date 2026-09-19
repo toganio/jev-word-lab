@@ -1,6 +1,6 @@
 import type { Message, Stats, Step } from './types';
 import { MAX_CONCURRENCY } from './parallel';
-export const APP_VERSION = 'jev-lab-11-default-categories';
+export const APP_VERSION = 'jev-lab-12-continuation-fix';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'error';
 export type RecordedOperation = {
   id: number;
@@ -26,6 +26,7 @@ export type RunRecord = {
     limit: number;
     beam: number;
     maxWords: number;
+    targetSentences?: number;
     requestBudget: number;
     repetitionGuard: boolean;
     grammarReview?: boolean;
@@ -68,6 +69,11 @@ export function sanitizeRecord(input: any): RunRecord {
     usage = input.usage;
   if (!settings || !usage || typeof settings.repetitionGuard !== 'boolean')
     throw new Error('Invalid settings');
+  if (
+    settings.targetSentences !== undefined &&
+    ![1, 3].includes(settings.targetSentences)
+  )
+    throw new Error('Invalid sentence target');
   const candidate = (c: any) => ({
     label: str(c.label, 200),
     probability: num(c.probability, 1),
@@ -87,6 +93,9 @@ export function sanitizeRecord(input: any): RunRecord {
       limit: num(settings.limit, 100000),
       beam: num(settings.beam, 5),
       maxWords: num(settings.maxWords, 64),
+      ...(settings.targetSentences !== undefined
+        ? { targetSentences: settings.targetSentences }
+        : {}),
       requestBudget: num(
         settings.requestBudget,
         input.kind === 'classification' ? 500000 : 400,
