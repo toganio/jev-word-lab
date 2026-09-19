@@ -97,3 +97,7 @@ Every successful returned classification was persisted. Word-equivalents are new
 ## Gateway retry correction (2026-09-19)
 
 Two v7 user scans stopped on an upstream HTTP 520. Version 8 includes 520 in the existing bounded retry policy: the identical Jev request is retried at most three times with shared cooldown and Retry-After, preserving successful checkpoints. Persistent failures still stop the run. This handles transient failures; it does not claim to fix the provider's origin error. Offline regression coverage exercises HTML 520 through the real proxy handler, successful recovery, exact-request reuse and exhaustion. No paid Jev call was made for this fix.
+
+## Dictionary key correction (2026-09-19)
+
+The actual dictionary includes `constructor` (index 36,198). An unscanned word lookup on a plain object inherited JavaScript's native constructor; spreading that value stopped large scans with `is not iterable`. Small scans could also mistake the inherited value for a working assignment. Version 9 reads only own category properties, builds sequential working maps without a prototype, and requires an array for completion checks. The same large-cohort failure was reproduced offline before the fix. Regression tests cover the real dictionary neighborhood, small scans, partial resume, durable snapshots and JSON category-file reuse. Existing categories and file schema are unchanged; no paid model calls or stored-category edits were made for this fix.

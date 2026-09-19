@@ -1051,6 +1051,84 @@ test('compact question payload reduces repeated criteria for the same complete d
   );
 });
 
+test('dictionary words matching inherited object properties classify in large cohorts', async () => {
+  const index = dictionary.words.findIndex(([word]) => word === 'constructor');
+  assert.ok(index >= 0);
+  const words = dictionary.words.slice(index - 48, index + 48).map(([w]) => w);
+  const existing: CategoryMap = {};
+  await prepareCategories(
+    words,
+    existing,
+    async (_state, questions) =>
+      answer(questions, (_id, q) => ({ [Object.keys(q.criteria)[0]]: 1 })),
+    new AbortController().signal,
+    () => {},
+    { concurrency: 8, pacer: unpaced },
+  );
+  assert.ok(Object.hasOwn(existing, 'constructor'));
+  assert.ok(words.every((word) => isComplete(existing[word])));
+  assert.deepEqual(
+    existing['constructor'],
+    AXES.map(() => 9),
+  );
+});
+
+test('constructor classifies in small scans, resumes, checkpoints and survives category file reuse', async () => {
+  const words = ['constructor', 'cat'];
+  const nativeConstructor = Object.getOwnPropertyDescriptors(Object);
+  const existing: CategoryMap = {};
+  const persisted: CategoryMap = {};
+  const checkpoints = new CategoryCheckpoints(async (batch) => {
+    Object.assign(persisted, JSON.parse(JSON.stringify(batch)));
+  });
+  let questionsSeen = 0;
+  const evaluate: Evaluate = async (_state, questions) => {
+    questionsSeen += Object.keys(questions).length;
+    return answer(questions, () => ({ '1': 1 }));
+  };
+  await prepareCategories(
+    words,
+    existing,
+    evaluate,
+    new AbortController().signal,
+    (batch) => checkpoints.save(batch),
+    { concurrency: 1, pacer: unpaced },
+  );
+  assert.equal(questionsSeen, words.length * AXES.length * 2);
+  assert.ok(Object.hasOwn(persisted, 'constructor'));
+  assert.ok(words.every((w) => isComplete(persisted[w])));
+  assert.deepEqual(Object.getOwnPropertyDescriptors(Object), nativeConstructor);
+  // A saved partial assignment is read as an own property and retains prior choices.
+  const partial = {
+    ...persisted,
+    constructor: AXES.map((_, i) => (i === 0 ? 3 : 0)),
+  };
+  const file = JSON.parse(
+    JSON.stringify(makeCategoryFile(partial, 'test-hash', words)),
+  );
+  const resumed = validateCategoryFile(file, 'test-hash', words);
+  questionsSeen = 0;
+  await prepareCategories(
+    words,
+    resumed,
+    evaluate,
+    new AbortController().signal,
+    (batch) => checkpoints.save(batch),
+    { concurrency: 1, pacer: unpaced },
+  );
+  assert.equal(questionsSeen, (AXES.length - 1) * 2);
+  assert.equal(persisted['constructor'][0], 3);
+  const completedFile = JSON.parse(
+    JSON.stringify(makeCategoryFile(persisted, 'test-hash', words)),
+  );
+  assert.equal(completedFile.complete, true);
+  assert.deepEqual(
+    validateCategoryFile(completedFile, 'test-hash', words),
+    persisted,
+  );
+  assert.deepEqual(Object.getOwnPropertyDescriptors(Object), nativeConstructor);
+});
+
 test('dimension cohorts merge concurrent axes without lost cells and preserve all existing decisions', async () => {
   const words = dictionary.words.slice(0, 96).map(([w]) => w);
   const existing: CategoryMap = {

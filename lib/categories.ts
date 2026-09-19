@@ -441,6 +441,10 @@ export type Axis = (typeof AXIS_DEFINITIONS)[number]['id'];
 /** One bitset per dimension. 0 is unscanned, 128 N/A, 256 uncertain. */
 export type Assignment = number[];
 export type CategoryMap = Record<string, Assignment>;
+/** Dictionary words such as "constructor" must never resolve through Object.prototype. */
+function ownAssignment(map: CategoryMap, word: string): Assignment | undefined {
+  return Object.hasOwn(map, word) ? map[word] : undefined;
+}
 export const AXIS_LABELS = Object.fromEntries(
   AXIS_DEFINITIONS.map((d) => [d.id, d.label]),
 ) as Record<Axis, string>;
@@ -453,8 +457,8 @@ export function isScanValue(value: unknown): value is number {
       value === UNCERTAIN)
   );
 }
-export function isComplete(a?: Assignment) {
-  return !!a && a.length === AXES.length && a.every(isScanValue);
+export function isComplete(a: unknown): a is Assignment {
+  return Array.isArray(a) && a.length === AXES.length && a.every(isScanValue);
 }
 export function selectedLabels(axis: Axis, value: number): string[] {
   if (value === NOT_APPLICABLE) return ['not_applicable'];
@@ -548,9 +552,11 @@ async function prepareSequential(
     if (!pending.length) return;
     signal.throwIfAborted();
     const result = await evaluate(scanState, questions, signal);
-    const working: CategoryMap = {};
+    const working: CategoryMap = Object.create(null);
     pending.forEach(({ word, axis }, i) => {
-      working[word] ||= [...(existing[word] || Array(AXES.length).fill(0))];
+      working[word] ||= [
+        ...(ownAssignment(existing, word) || Array(AXES.length).fill(0)),
+      ];
       working[word][axis] = combineTagGroups(
         Number(result.answers[`w${i * 2}`].choice),
         Number(result.answers[`w${i * 2 + 1}`].choice),
@@ -564,7 +570,7 @@ async function prepareSequential(
   }
   for (const word of words) {
     for (let axis = 0; axis < AXES.length; axis++) {
-      if (existing[word]?.[axis]) continue;
+      if (ownAssignment(existing, word)?.[axis]) continue;
       const d = AXIS_DEFINITIONS[axis];
       const pair = [0, 1].map(
         (group): Question => ({
@@ -696,7 +702,7 @@ export async function prepareCategories(
               bytes = stateBytes;
             };
             for (const word of cohort) {
-              if (existing[word]?.[axis]) continue;
+              if (ownAssignment(existing, word)?.[axis]) continue;
               const pair = [0, 1].map(
                 (group): Question => ({
                   type: 'choice',
@@ -754,7 +760,8 @@ export async function prepareCategories(
                     return Number(entry[0]);
                   });
                   const assignment = [
-                    ...(existing[word] || Array(AXES.length).fill(0)),
+                    ...(ownAssignment(existing, word) ||
+                      Array(AXES.length).fill(0)),
                   ];
                   assignment[job.axis] = combineTagGroups(
                     selected[0],
