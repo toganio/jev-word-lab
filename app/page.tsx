@@ -46,7 +46,6 @@ import {
   isComplete,
   selectedLabels,
   prepareCategories,
-  sanitizeCategories,
   type CategoryMap,
 } from '@/lib/categories';
 import {
@@ -60,6 +59,10 @@ import {
   ProviderError,
   retryThrottled,
 } from '@/lib/parallel';
+import {
+  loadInitialCategories,
+  type CategoryPage,
+} from '@/lib/category-bootstrap';
 import { CategoryCheckpoints } from '@/lib/checkpoints';
 import { fetchJson } from '@/lib/request';
 import { generate } from '@/lib/engine';
@@ -75,19 +78,6 @@ import type {
   Step,
   Trace,
 } from '@/lib/types';
-type CategoryPage = {
-  version: string;
-  categories: CategoryMap;
-  nextCursor: string | null;
-  sourceSha256: string;
-  sessionId: string | null;
-  expectedCount: number;
-  expectedCells: number;
-  verifiedCount: number;
-  scannedCells: number;
-  missingCount: number;
-  complete: boolean;
-};
 type Operation = {
   id: number;
   label: string;
@@ -179,6 +169,8 @@ export default function Home() {
     [query, setQuery] = useState('');
   const [categoriesLoading, setCategoriesLoading] = useState(true);
   const [categoryError, setCategoryError] = useState('');
+  const [bundledCategories, setBundledCategories] = useState(false);
+  const [storageUnavailable, setStorageUnavailable] = useState(false);
   const pendingCategories = useRef<CategoryMap | null>(null);
   const preparationActive = useRef(false);
   const classificationStartCells = useRef(0);
@@ -236,28 +228,22 @@ export default function Home() {
     setCategoriesLoading(true);
     setCategoryError('');
     try {
-      const all: CategoryMap = {};
-      let cursor: string | null = null;
-      let session: string | null = null;
-      do {
-        const params = new URLSearchParams();
-        if (cursor) params.set('after', cursor);
-        if (session) params.set('session', session);
-        const response = await fetch(`/api/categories?${params}`);
-        if (!response.ok) throw new Error();
-        const data = (await response.json()) as CategoryPage;
-        if (data.version !== TAXONOMY_VERSION) throw new Error();
-        Object.assign(all, sanitizeCategories(data.categories));
-        session = data.sessionId;
-        sourceHash.current = data.sourceSha256;
-        setCoverage(data);
-        cursor = data.nextCursor;
-      } while (cursor);
-      sessionRef.current = session;
-      setOverrides(all);
-    } catch {
+      const dictionary = await dictPromise.current;
+      if (!dictionary) throw new Error('Dictionary is not ready.');
+      const result = await loadInitialCategories(
+        dictionary.words.map(([word]) => word),
+      );
+      sessionRef.current = result.page.sessionId;
+      sourceHash.current = result.page.sourceSha256;
+      setCoverage(result.page);
+      setOverrides(result.page.categories);
+      setBundledCategories(result.bundled);
+      setStorageUnavailable(result.storageUnavailable);
+    } catch (error) {
       setCategoryError(
-        'Could not load the saved category session. Reload to try again.',
+        error instanceof Error
+          ? error.message
+          : 'Could not load categories. Reload to try again.',
       );
     } finally {
       setCategoriesLoading(false);
@@ -369,6 +355,7 @@ export default function Home() {
         dict.words.map(([w]) => w),
       );
       await startCategorySession(true);
+      setBundledCategories(false);
       setOverrides({});
       const entries = Object.entries(map);
       for (let i = 0; i < entries.length; i += 100) {
@@ -1158,8 +1145,16 @@ export default function Home() {
           <p>
             {coverage?.sessionId
               ? `Saved session: ${coverage.sessionId.slice(0, 8)}`
-              : 'A persistent session is created on the first preparation.'}
+              : bundledCategories
+                ? 'Bundled Jev categories loaded automatically. No upload or categorization required.'
+                : 'A persistent session is created on the first preparation.'}
           </p>
+          {storageUnavailable && (
+            <p role="status">
+              Saved sessions are currently unavailable. Using the bundled Jev
+              categories; saving imports requires database access.
+            </p>
+          )}
           {categoriesReady && (
             <p role="status">
               <strong>Category file ready — 100% coverage verified.</strong>{' '}
@@ -1199,7 +1194,7 @@ export default function Home() {
             Uploading makes no Jev calls. The dictionary and schema are
             validated; use preparation to resume missing assessments.
           </p>
-          {categoriesLoading && <p>Loading saved categories…</p>}
+          {categoriesLoading && <p>Loading and verifying categories…</p>}
           {categoryError && (
             <p role="alert">
               {categoryError}{' '}

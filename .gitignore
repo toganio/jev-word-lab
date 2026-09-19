@@ -47,3 +47,6 @@ next-env.d.ts
 .npmrc
 id_rsa
 id_ed25519
+
+# Generated from the checked-in classification snapshot
+/public/data/jev-category-map-36-complete.json
