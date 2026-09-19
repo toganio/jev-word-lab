@@ -53,6 +53,7 @@ import {
   validateCategoryFile,
   scannedCells,
 } from '@/lib/category-file';
+import { DEFAULT_CONCURRENCY, ProviderError } from '@/lib/parallel';
 import { generate } from '@/lib/engine';
 import { RunRecorder, type SaveStatus } from '@/lib/recorder';
 import { APP_VERSION, type RunStatus } from '@/lib/run-record';
@@ -166,6 +167,12 @@ export default function Home() {
   const [categoryError, setCategoryError] = useState('');
   const pendingCategories = useRef<CategoryMap | null>(null);
   const preparationActive = useRef(false);
+  const [parallelism, setParallelism] = useState(String(DEFAULT_CONCURRENCY));
+  const [activeRequests, setActiveRequests] = useState(0);
+  const [throughput, setThroughput] = useState({
+    tokensPerSecond: 0,
+    targetTokensPerSecond: 237500,
+  });
   const sessionRef = useRef<string | null>(null);
   const sourceHash = useRef('');
   const [coverage, setCoverage] = useState<{
@@ -439,6 +446,7 @@ export default function Home() {
                 )
               : Number(budget),
           repetitionGuard,
+          parallelism: Number(parallelism),
         },
         conversation: conversation.slice(-10),
         steps: [],
@@ -502,13 +510,21 @@ export default function Home() {
       });
       const data = await r.json();
       if (!r.ok)
-        throw new Error(
+        throw new ProviderError(
           data &&
             typeof data === 'object' &&
             'error' in data &&
             typeof data.error === 'string'
             ? data.error
             : `API hatası (${r.status})`,
+          r.status,
+          data &&
+            typeof data === 'object' &&
+            'retryAfterMs' in data &&
+            typeof data.retryAfterMs === 'number' &&
+            Number.isFinite(data.retryAfterMs)
+            ? Math.max(0, data.retryAfterMs)
+            : 0,
         );
       validateResponse(data, questions);
       const summary =
@@ -553,6 +569,12 @@ export default function Home() {
         ms: Date.now() - at,
         summary,
       });
+      if (!signal.aborted && e instanceof Error && e.name === 'TimeoutError') {
+        throw new ProviderError(
+          'Jev isteği zaman aşımına uğradı; sınırlı yeniden deneme yapılacak.',
+          408,
+        );
+      }
       throw e;
     }
   };
@@ -700,6 +722,7 @@ export default function Home() {
     busy.current = true;
     setClassifying(true);
     preparationActive.current = true;
+    setThroughput({ tokensPerSecond: 0, targetTokensPerSecond: 237500 });
     setError('');
     setOperations([]);
     setMonitorTab('monitor');
@@ -744,16 +767,32 @@ export default function Home() {
         c.signal,
         async (result) => {
           done += Object.values(result).filter(isComplete).length;
-          pendingCategories.current = result;
+          pendingCategories.current = {
+            ...pendingCategories.current,
+            ...result,
+          };
           recording.current?.patch({
             answer: `${done} tamamlanan kelime adımı; 36 boyutlu tarama sürüyor. Son grup: ${JSON.stringify(result)}`,
           });
           setOverrides((old) => ({ ...old, ...result }));
           await saveCategories(result);
-          pendingCategories.current = null;
+          const unsaved = { ...pendingCategories.current };
+          for (const word of Object.keys(result)) delete unsaved[word];
+          pendingCategories.current = Object.keys(unsaved).length
+            ? unsaved
+            : null;
           setPhase(
             `Jev bütün sözlüğün 36 boyutunu tarıyor; tamamlanan sonuçlar kaydedildi.`,
           );
+        },
+        {
+          concurrency: Number(parallelism),
+          onActivity: setActiveRequests,
+          onTelemetry: setThroughput,
+          onBackoff: (ms, attempt) =>
+            setPhase(
+              `TypeSafe sınırı/yoğunluğu: ${Math.ceil(ms / 1000)} sn bekleniyor, ${attempt}. yeniden deneme. Yalnızca Jev kullanılacak.`,
+            ),
         },
       );
       if (!(await verifyCategorySession()))
@@ -782,6 +821,7 @@ export default function Home() {
       await recorder?.finish(outcome, outcomeReason);
       setClassifying(false);
       preparationActive.current = false;
+      setActiveRequests(0);
       busy.current = false;
       controller.current = null;
     }
@@ -798,6 +838,7 @@ export default function Home() {
         beam: Number(beam),
         maxWords: Number(maxWords),
         repetitionGuard,
+        parallelism: Number(parallelism),
         requestBudget: Number(budget),
       },
       messages,
@@ -946,6 +987,17 @@ export default function Home() {
             </p>
           </div>
           <div className="classify-controls">
+            <Picker
+              label="Otomatik hız · eşzamanlı istek tavanı"
+              value={parallelism}
+              onChange={setParallelism}
+              disabled={isBusy}
+              options={[
+                ['8', 'En fazla 8'],
+                ['16', 'En fazla 16'],
+                ['32', 'En fazla 32 · otomatik satürasyon'],
+              ]}
+            />
             <Button
               onClick={() => void classify()}
               disabled={
@@ -984,6 +1036,17 @@ export default function Home() {
             TypeSafe isteği gerektirir (36 boyutlu tarama) ve API kullanımına
             yansır. Bu uzun işlem sırasında sayfayı açık tut. Durdurur veya
             kapatırsan kaydedilen kelimelerden devam edilir.
+          </p>
+          <p>
+            {number(throughput.tokensPerSecond)} giriş tokenı/sn (son 5 sn) ·
+            hedef en fazla {number(throughput.targetTokensPerSecond)} token/sn.
+            Gerçek API kullanımı ve yoğunluk yanıtlarına göre otomatik
+            ayarlanır.
+          </p>
+          <p>
+            {activeRequests} / {parallelism} etkin Jev isteği · istek başına en
+            fazla 32 soru paralel değerlendirilir. Token/istek sınırlarında
+            kuyruk yavaşlar ve yeniden dener.
           </p>
           <p>
             Kelime tahmini tüm sözlük tamamlanınca açılır. Aşağıdaki istek

@@ -670,3 +670,207 @@ test('prediction requires complete coverage and exposes the same word in several
     new Set(['type: noun', 'type: verb']),
   );
 });
+
+import {
+  RequestPacer,
+  ProviderError,
+  retryThrottled,
+  abortableDelay,
+} from '../lib/parallel';
+const unpaced = { acquire: async () => {}, pause: () => {} };
+test('parallel preparation overlaps independent Jev calls and independent-word saves while preserving all cells', async () => {
+  const words = dictionary.words.slice(0, 32).map(([w]) => w);
+  const output: CategoryMap = {};
+  const seen = new Set<string>();
+  let active = 0,
+    peak = 0,
+    saves = 0;
+  await prepareCategories(
+    words,
+    {},
+    async (state, qs, signal) => {
+      active++;
+      peak = Math.max(peak, active);
+      for (const t of (
+        state as { targets: { word: string; dimension: string }[] }
+      ).targets) {
+        const id = `${t.word}:${t.dimension}`;
+        assert.ok(!seen.has(id));
+        seen.add(id);
+      }
+      await abortableDelay(1, signal);
+      active--;
+      return answer(qs, () => ({ '3': 1 }));
+    },
+    new AbortController().signal,
+    async (batch) => {
+      saves++;
+      assert.ok(saves <= 4);
+      await new Promise((r) => setTimeout(r, 1));
+      Object.assign(output, batch);
+      saves--;
+    },
+    { concurrency: 4, pacer: unpaced },
+  );
+  assert.equal(peak, 4);
+  assert.equal(active, 0);
+  assert.equal(seen.size, words.length * 36);
+  assert.ok(words.every((w) => isComplete(output[w])));
+});
+test('parallel cancellation settles every outstanding operation before returning', async () => {
+  const controller = new AbortController();
+  let active = 0,
+    calls = 0;
+  const pending = prepareCategories(
+    dictionary.words.slice(0, 32).map(([w]) => w),
+    {},
+    async (_state, qs, signal) => {
+      active++;
+      calls++;
+      try {
+        await abortableDelay(100, signal);
+        return answer(qs, () => ({ '1': 1 }));
+      } finally {
+        active--;
+      }
+    },
+    controller.signal,
+    () => {},
+    { concurrency: 4, pacer: unpaced },
+  );
+  await new Promise((r) => setTimeout(r, 5));
+  controller.abort();
+  await assert.rejects(pending);
+  assert.equal(active, 0);
+  assert.equal(calls, 4);
+});
+test('rate limit retries honor Retry-After, stop at bounded attempts, and do not retry auth failures', async () => {
+  let attempts = 0;
+  const waits: number[] = [];
+  const result = await retryThrottled(
+    async () => {
+      if (++attempts < 3) throw new ProviderError('busy', 429, 5000);
+      return 'jev';
+    },
+    new AbortController().signal,
+    () => {},
+    async (ms) => {
+      waits.push(ms);
+    },
+  );
+  assert.equal(result, 'jev');
+  assert.deepEqual(waits, [5000, 5000]);
+  attempts = 0;
+  await assert.rejects(
+    retryThrottled(
+      async () => {
+        attempts++;
+        throw new ProviderError('auth', 401);
+      },
+      new AbortController().signal,
+      () => {},
+      async () => {},
+    ),
+  );
+  assert.equal(attempts, 1);
+  attempts = 0;
+  await assert.rejects(
+    retryThrottled(
+      async () => {
+        attempts++;
+        throw new ProviderError('busy', 529);
+      },
+      new AbortController().signal,
+      () => {},
+      async () => {},
+    ),
+  );
+  assert.equal(attempts, 4);
+});
+test('shared pacing adapts to real token use and delays all workers after throttling', async () => {
+  let now = 0;
+  const waits: number[] = [];
+  const pacer = new RequestPacer(
+    () => now,
+    async (ms) => {
+      waits.push(ms);
+      now += ms;
+    },
+  );
+  const signal = new AbortController().signal;
+  await Promise.all([
+    pacer.acquire(100000, signal),
+    pacer.acquire(100000, signal),
+  ]);
+  assert.ok(now >= (50000 / 237500) * 1000);
+  pacer.observe(100000, 20000);
+  assert.equal(pacer.telemetry().tokensPerSecond, 4000);
+  pacer.pause(5000);
+  assert.ok(pacer.telemetry().targetTokensPerSecond < 237500);
+  const before = now;
+  await pacer.acquire(100000, signal);
+  assert.ok(now - before >= 5000);
+  assert.ok(waits.length >= 2);
+});
+test('proxy passes through sanitized Retry-After hints without changing Jev provider', async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () =>
+      new Response('{}', {
+        status: 429,
+        headers: { 'Retry-After': '3' },
+      })) as typeof fetch;
+    const result = await POST(
+      new Request('https://lab.example/api/decision', {
+        method: 'POST',
+        headers: { 'x-typesafe-key': 'fake-unit-test-key' },
+        body: JSON.stringify({
+          state: 'x',
+          questions: {
+            pick: {
+              type: 'choice',
+              instructions: 'Pick',
+              criteria: { a: null, b: null },
+            },
+          },
+        }),
+      }),
+    );
+    assert.equal(result.status, 429);
+    assert.equal(
+      ((await result.json()) as { retryAfterMs: number }).retryAfterMs,
+      3000,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('transient timeouts retry but explicit cancellation never retries', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  await retryThrottled(
+    async () => {
+      if (++calls === 1) throw new ProviderError('timeout', 504);
+      return 'jev';
+    },
+    controller.signal,
+    () => {},
+    async () => {},
+  );
+  assert.equal(calls, 2);
+  calls = 0;
+  await assert.rejects(
+    retryThrottled(
+      async () => {
+        calls++;
+        controller.abort();
+        throw new ProviderError('timeout', 408);
+      },
+      controller.signal,
+      () => {},
+      async () => {},
+    ),
+  );
+  assert.equal(calls, 1);
+});

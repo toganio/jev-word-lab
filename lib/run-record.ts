@@ -1,5 +1,5 @@
 import type { Message, Stats, Step } from './types';
-export const APP_VERSION = 'jev-lab-3-36-axes';
+export const APP_VERSION = 'jev-lab-4-parallel';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'error';
 export type RecordedOperation = {
   id: number;
@@ -27,6 +27,7 @@ export type RunRecord = {
     maxWords: number;
     requestBudget: number;
     repetitionGuard: boolean;
+    parallelism?: number;
   };
   conversation: Message[];
   steps: Step[];
@@ -86,9 +87,12 @@ export function sanitizeRecord(input: any): RunRecord {
       maxWords: num(settings.maxWords, 64),
       requestBudget: num(
         settings.requestBudget,
-        input.kind === 'classification' ? 200000 : 400,
+        input.kind === 'classification' ? 500000 : 400,
       ),
       repetitionGuard: settings.repetitionGuard,
+      ...(typeof settings.parallelism === 'number'
+        ? { parallelism: num(settings.parallelism, 32) }
+        : {}),
     },
     conversation: arr(input.conversation, 10, (m) => {
       if (!['user', 'assistant'].includes(m.role))
@@ -129,7 +133,7 @@ export function sanitizeRecord(input: any): RunRecord {
     usage: {
       requests: num(
         usage.requests,
-        input.kind === 'classification' ? 200000 : 400,
+        input.kind === 'classification' ? 500000 : 400,
       ),
       inputTokens: num(usage.inputTokens),
       outputTokens: num(usage.outputTokens),

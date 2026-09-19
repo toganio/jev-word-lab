@@ -1,3 +1,9 @@
+import {
+  DEFAULT_CONCURRENCY,
+  MAX_CONCURRENCY,
+  RequestPacer,
+  retryThrottled,
+} from './parallel';
 import type { Evaluate, Question } from './types';
 export const TAXONOMY_VERSION = 'jev-36-multilabel-1';
 export const NOT_APPLICABLE = 128;
@@ -499,7 +505,7 @@ export function sanitizeCategories(input: unknown, max = 100000): CategoryMap {
     }),
   );
 }
-export async function prepareCategories(
+async function prepareSequential(
   words: string[],
   existing: CategoryMap,
   evaluate: Evaluate,
@@ -553,4 +559,95 @@ export async function prepareCategories(
     }
   }
   await flush();
+}
+
+export type PreparationOptions = {
+  concurrency?: number;
+  onActivity?: (active: number) => void;
+  onBackoff?: (ms: number, attempt: number) => void;
+  pacer?: Pick<RequestPacer, 'acquire' | 'pause'> &
+    Partial<Pick<RequestPacer, 'observe' | 'telemetry'>>;
+  onTelemetry?: (value: {
+    tokensPerSecond: number;
+    targetTokensPerSecond: number;
+  }) => void;
+};
+/** A worker owns complete words, so simultaneous checkpoints never overwrite a sibling's dimensions. */
+export async function prepareCategories(
+  words: string[],
+  existing: CategoryMap,
+  evaluate: Evaluate,
+  signal: AbortSignal,
+  onBatch: (result: CategoryMap) => void | Promise<void>,
+  options: PreparationOptions = {},
+) {
+  const parallel = options.concurrency ?? DEFAULT_CONCURRENCY;
+  if (!Number.isInteger(parallel) || parallel < 1 || parallel > MAX_CONCURRENCY)
+    throw new Error('Invalid parallelism');
+  const pacer = options.pacer || new RequestPacer();
+  let cursor = 0,
+    active = 0;
+  let failure: unknown;
+  let failed = false;
+  // Different workers own different words. Their saves may overlap; each worker
+  // awaits its own durable checkpoint before proceeding to its next dimensions.
+  const persist = (result: CategoryMap) => onBatch(result);
+  const parallelEvaluate: Evaluate = (state, questions, requestSignal) =>
+    retryThrottled(
+      async () => {
+        if (failed) throw failure;
+        const bytes = new TextEncoder().encode(
+          JSON.stringify({ state, questions }),
+        ).length;
+        await pacer.acquire(bytes, requestSignal);
+        if (failed) throw failure;
+        active++;
+        options.onActivity?.(active);
+        try {
+          const result = await evaluate(state, questions, requestSignal);
+          pacer.observe?.(bytes, result.usage.input_tokens);
+          if (pacer.telemetry) options.onTelemetry?.(pacer.telemetry());
+          return result;
+        } finally {
+          active--;
+          options.onActivity?.(active);
+        }
+      },
+      requestSignal,
+      (ms, attempt) => {
+        pacer.pause(ms);
+        options.onBackoff?.(ms, attempt);
+      },
+    );
+  async function worker() {
+    try {
+      while (!failed && cursor < words.length) {
+        signal.throwIfAborted();
+        // Eight complete words have 288 dimensions: nine full 32-question requests.
+        const batch = words.slice(cursor, cursor + 8);
+        cursor += batch.length;
+        await prepareSequential(
+          batch,
+          existing,
+          parallelEvaluate,
+          signal,
+          persist,
+        );
+      }
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+      }
+    }
+  }
+  // Await every worker, including already-running successes, before finishing the run.
+  await Promise.all(
+    Array.from(
+      { length: Math.min(parallel, Math.ceil(words.length / 8)) },
+      worker,
+    ),
+  );
+  if (failed) throw failure;
+  signal.throwIfAborted();
 }

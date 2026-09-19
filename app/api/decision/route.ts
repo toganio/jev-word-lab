@@ -47,10 +47,22 @@ export async function POST(request: Request) {
         429: 'TypeSafe istek sınırına ulaşıldı. Biraz bekleyip tekrar dene.',
         529: 'TypeSafe şu anda yoğun. Biraz sonra tekrar dene.',
       };
-      return fail(
-        messages[response.status] ||
-          `TypeSafe isteği başarısız (${response.status}).`,
-        response.status,
+      const retry = response.headers.get('retry-after');
+      const seconds = retry === null ? NaN : Number(retry);
+      const retryAfterMs =
+        retry === null
+          ? 0
+          : Number.isFinite(seconds)
+            ? Math.max(0, seconds * 1000)
+            : Math.max(0, Date.parse(retry) - Date.now()) || 0;
+      return Response.json(
+        {
+          error:
+            messages[response.status] ||
+            `TypeSafe isteği başarısız (${response.status}).`,
+          retryAfterMs,
+        },
+        { status: response.status, headers },
       );
     }
     const data = await response.json();
