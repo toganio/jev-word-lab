@@ -9,7 +9,7 @@ export function validateRequest(body: any): void {
   )
     throw new Error('Invalid request');
   const qs = Object.values(body.questions) as any[];
-  if (qs.length < 1 || qs.length > 32) throw new Error('Question count');
+  if (qs.length < 1 || qs.length > 128) throw new Error('Question count');
   for (const q of qs) {
     if (
       q.type !== 'choice' ||

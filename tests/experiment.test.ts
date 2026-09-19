@@ -493,9 +493,7 @@ import {
   validateDictionaryCategories,
 } from '../lib/category-coverage';
 
-test('36 dimensions support multiple labels, explicit uncertainty, and bounded valid choice requests', async () => {
-  assert.equal(AXES.length, 36);
-  assert.equal(new Set(AXES).size, 36);
+test('compact paired decisions scan all 36 dimensions within context bounds and preserve multi-label meaning', async () => {
   const saved: CategoryMap = {};
   const seen = new Set<string>();
   await prepareCategories(
@@ -504,19 +502,20 @@ test('36 dimensions support multiple labels, explicit uncertainty, and bounded v
     async (state, qs) => {
       validateRequest({ state, questions: qs });
       assert.ok(Object.keys(qs).length <= QUESTIONS_PER_REQUEST);
-      assert.ok(JSON.stringify({ state, questions: qs }).length < 180000);
-      const targets = (
-        state as { targets: { word: string; dimension: string }[] }
-      ).targets;
-      targets.forEach((t) => {
-        const key = `${t.word}:${t.dimension}`;
-        assert.ok(!seen.has(key));
-        seen.add(key);
-      });
-      const r = answer(qs, (_id, q) => {
-        assert.equal(Object.keys(q.criteria).length, 65);
-        return { '3': 1 };
-      });
+      assert.equal(Object.keys(qs).length % 2, 0);
+      assert.ok(
+        Buffer.byteLength(JSON.stringify({ state, questions: qs })) <=
+          CATEGORY_REQUEST_BYTES,
+      );
+      for (const q of Object.values(qs)) {
+        assert.equal(Object.keys(q.criteria).length, 9);
+        const signature = q.instructions + JSON.stringify(q.criteria);
+        assert.ok(!seen.has(signature));
+        seen.add(signature);
+      }
+      const r = answer(qs, (id) => ({
+        [Number(id.slice(1)) % 2 === 0 ? '3' : String(NOT_APPLICABLE)]: 1,
+      }));
       validateResponse(r, qs);
       return r;
     },
@@ -525,7 +524,7 @@ test('36 dimensions support multiple labels, explicit uncertainty, and bounded v
       Object.assign(saved, batch);
     },
   );
-  assert.equal(seen.size, 72);
+  assert.equal(seen.size, 2 * 36 * 2);
   assert.ok(isComplete(saved.water));
   assert.deepEqual(selectedLabels('type', saved.water[AXES.indexOf('type')]), [
     'noun',
@@ -533,39 +532,49 @@ test('36 dimensions support multiple labels, explicit uncertainty, and bounded v
   ]);
   assert.deepEqual(selectedLabels('type', NOT_APPLICABLE), ['not_applicable']);
   assert.deepEqual(selectedLabels('type', UNCERTAIN), ['uncertain']);
+  for (let value = 1; value < 64; value++) {
+    assert.equal(
+      combineTagGroups(
+        value & 7 || NOT_APPLICABLE,
+        value >> 3 || NOT_APPLICABLE,
+      ),
+      value,
+    );
+  }
+  assert.equal(
+    combineTagGroups(NOT_APPLICABLE, NOT_APPLICABLE),
+    NOT_APPLICABLE,
+  );
+  assert.equal(combineTagGroups(1, UNCERTAIN), UNCERTAIN);
+  assert.throws(() => combineTagGroups(8, 1));
 });
-test('an interrupted scan resumes missing dimensions without skipping the unfinished word or repeating paid work', async () => {
+test('an interrupted compact scan resumes only missing complete pairs', async () => {
   const controller = new AbortController();
   let calls = 0;
   const saved: CategoryMap = {};
+  const words = ['water', 'tea', 'bank', 'run'];
   const evaluate: Evaluate = async (_state, qs) => {
     calls++;
     return answer(qs, () => ({ '1': 1 }));
   };
   await assert.rejects(
-    prepareCategories(
-      ['water', 'tea'],
-      {},
-      evaluate,
-      controller.signal,
-      (batch) => {
-        Object.assign(saved, batch);
-        controller.abort();
-      },
-    ),
+    prepareCategories(words, {}, evaluate, controller.signal, (batch) => {
+      Object.assign(saved, batch);
+      controller.abort();
+    }),
   );
   assert.equal(calls, 1);
-  assert.equal(saved.water.filter(Boolean).length, 32);
-  assert.ok(!isComplete(saved.water));
-  const targets: string[] = [];
+  const scanned = Object.values(saved).reduce(
+    (n, a) => n + a.filter(Boolean).length,
+    0,
+  );
+  assert.ok(scanned > 0 && scanned < words.length * 36);
+  let remainingQuestions = 0;
   await prepareCategories(
-    ['water', 'tea'],
+    words,
     structuredClone(saved),
     async (state, qs) => {
-      for (const t of (
-        state as { targets: { word: string; dimension: string }[] }
-      ).targets)
-        targets.push(`${t.word}:${t.dimension}`);
+      remainingQuestions += Object.keys(qs).length;
       return evaluate(state, qs, new AbortController().signal);
     },
     new AbortController().signal,
@@ -573,12 +582,11 @@ test('an interrupted scan resumes missing dimensions without skipping the unfini
       Object.assign(saved, batch);
     },
   );
-  assert.equal(targets.length, 40);
-  assert.ok(!targets.includes('water:meaning'));
-  assert.ok(isComplete(saved.water) && isComplete(saved.tea));
+  assert.equal(remainingQuestions, (words.length * 36 - scanned) * 2);
+  assert.ok(words.every((w) => isComplete(saved[w])));
   const before = calls;
   await prepareCategories(
-    ['water', 'tea'],
+    words,
     saved,
     evaluate,
     new AbortController().signal,
@@ -691,12 +699,10 @@ test('parallel preparation overlaps independent Jev calls and independent-word s
     async (state, qs, signal) => {
       active++;
       peak = Math.max(peak, active);
-      for (const t of (
-        state as { targets: { word: string; dimension: string }[] }
-      ).targets) {
-        const id = `${t.word}:${t.dimension}`;
-        assert.ok(!seen.has(id));
-        seen.add(id);
+      for (const q of Object.values(qs)) {
+        const signature = q.instructions + JSON.stringify(q.criteria);
+        assert.ok(!seen.has(signature));
+        seen.add(signature);
       }
       await abortableDelay(1, signal);
       active--;
@@ -714,7 +720,7 @@ test('parallel preparation overlaps independent Jev calls and independent-word s
   );
   assert.equal(peak, 4);
   assert.equal(active, 0);
-  assert.equal(seen.size, words.length * 36);
+  assert.equal(seen.size, words.length * 36 * 2);
   assert.ok(words.every((w) => isComplete(output[w])));
 });
 test('parallel cancellation settles every outstanding operation before returning', async () => {
@@ -873,4 +879,85 @@ test('transient timeouts retry but explicit cancellation never retries', async (
     ),
   );
   assert.equal(calls, 1);
+});
+
+import { CATEGORY_REQUEST_BYTES, combineTagGroups } from '../lib/categories';
+import { CategoryCheckpoints } from '../lib/checkpoints';
+test('checkpoint batching coalesces parallel saves, stays bounded and acknowledges only durable writes', async () => {
+  let writes = 0,
+    active = 0;
+  const stored: CategoryMap = {};
+  const queue = new CategoryCheckpoints(async (batch) => {
+    writes++;
+    active++;
+    assert.equal(active, 1);
+    assert.ok(Object.keys(batch).length <= 100);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    Object.assign(stored, batch);
+    active--;
+  });
+  await Promise.all(
+    Array.from({ length: 160 }, (_, i) => {
+      const word = `word${i}`;
+      return queue
+        .save({ [word]: AXES.map(() => 1) })
+        .then(() => assert.ok(stored[word]));
+    }),
+  );
+  assert.equal(writes, 2);
+  assert.equal(Object.keys(stored).length, 160);
+  const failed = new CategoryCheckpoints(async () => {
+    throw new Error('offline');
+  });
+  const results = await Promise.allSettled([
+    failed.save({ a: [] }),
+    failed.save({ b: [] }),
+  ]);
+  assert.ok(results.every((r) => r.status === 'rejected'));
+});
+test('compact question payload reduces repeated criteria for the same complete dictionary sample', async () => {
+  let bytes = 0,
+    calls = 0,
+    count = 0;
+  const words = dictionary.words.slice(0, 32).map(([w]) => w);
+  await prepareCategories(
+    words,
+    {},
+    async (state, qs) => {
+      const size = Buffer.byteLength(JSON.stringify({ state, questions: qs }));
+      assert.ok(size <= CATEGORY_REQUEST_BYTES);
+      bytes += size;
+      calls++;
+      count += Object.keys(qs).length;
+      return answer(qs, () => ({ '1': 1 }));
+    },
+    new AbortController().signal,
+    () => {},
+    { concurrency: 4, pacer: unpaced },
+  );
+  const legacyCriteriaBytes =
+    words.length *
+    AXIS_DEFINITIONS.reduce(
+      (n, d) =>
+        n +
+        Buffer.byteLength(
+          JSON.stringify(
+            Object.fromEntries(
+              Array.from({ length: 63 }, (_, i) => [
+                String(i + 1),
+                d.tags.filter((_, b) => (i + 1) & (1 << b)).join(' + '),
+              ]),
+            ),
+          ),
+        ),
+      0,
+    );
+  assert.equal(count, words.length * 36 * 2);
+  assert.ok(
+    bytes < legacyCriteriaBytes * 0.6,
+    `${bytes} vs legacy criteria alone ${legacyCriteriaBytes}`,
+  );
+  console.log(
+    `Compact 32-word sample: ${calls} requests, ${bytes} serialized bytes; legacy criteria alone ${legacyCriteriaBytes} bytes`,
+  );
 });

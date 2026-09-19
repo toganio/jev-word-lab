@@ -42,6 +42,7 @@ import {
   CATEGORY_OPTIONS,
   TAXONOMY_VERSION,
   QUESTIONS_PER_REQUEST,
+  QUESTIONS_PER_CELL,
   isComplete,
   selectedLabels,
   prepareCategories,
@@ -53,7 +54,12 @@ import {
   validateCategoryFile,
   scannedCells,
 } from '@/lib/category-file';
-import { DEFAULT_CONCURRENCY, ProviderError } from '@/lib/parallel';
+import {
+  DEFAULT_CONCURRENCY,
+  ProviderError,
+  retryThrottled,
+} from '@/lib/parallel';
+import { CategoryCheckpoints } from '@/lib/checkpoints';
 import { generate } from '@/lib/engine';
 import { RunRecorder, type SaveStatus } from '@/lib/recorder';
 import { APP_VERSION, type RunStatus } from '@/lib/run-record';
@@ -185,23 +191,24 @@ export default function Home() {
     sessionId: string | null;
   } | null>(null);
   const [importing, setImporting] = useState(false);
+  const previewEntries = useMemo(
+    () => Object.entries(overrides).slice(0, 100),
+    [overrides],
+  );
   const categoryGroups = useMemo(
     () =>
       Object.fromEntries(
         AXES.map((axis, index) => {
           const groups: Record<string, string[]> = {};
           // Bounded preview; the downloadable file contains every word.
-          for (const [word, assignment] of Object.entries(overrides).slice(
-            0,
-            100,
-          )) {
+          for (const [word, assignment] of previewEntries) {
             for (const label of selectedLabels(axis, assignment[index]))
               (groups[label] ||= []).push(word);
           }
           return [axis, groups];
         }),
       ) as Record<string, Record<string, string[]>>,
-    [overrides],
+    [previewEntries],
   );
   const preparedCount = useMemo(
     () => dict?.words.filter(([w]) => isComplete(overrides[w])).length || 0,
@@ -275,21 +282,46 @@ export default function Home() {
     return data.complete === true;
   }
   async function saveCategories(categories: CategoryMap) {
-    const r = await fetch('/api/categories', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // Idempotent persistence retries never call Jev or add paid model work.
+    const entries = Object.entries(categories);
+    for (let i = 0; i < entries.length; i += 100) {
+      const body = JSON.stringify({
         version: TAXONOMY_VERSION,
         sourceSha256: sourceHash.current,
         sessionId: sessionRef.current,
-        categories,
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!r.ok)
-      throw new Error(
-        'Kategori oturumu kaydedilemedi. Tamamlanan seçimler korundu; hazırlama tuşuyla yeniden dene.',
+        categories: Object.fromEntries(entries.slice(i, i + 100)),
+      });
+      await retryThrottled(
+        async () => {
+          const timeout = AbortSignal.timeout(30000);
+          try {
+            const r = await fetch('/api/categories', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body,
+              signal: timeout,
+            });
+            if (!r.ok)
+              throw new ProviderError(
+                'Kategori kaydı başarısız; sonuçlar bellekte korunuyor.',
+                r.status,
+              );
+          } catch (error) {
+            if (timeout.aborted)
+              throw new ProviderError(
+                'Kategori kaydı zaman aşımı; Jev çağrısı tekrarlanmadan kayıt yeniden deneniyor.',
+                408,
+              );
+            throw error;
+          }
+        },
+        new AbortController().signal,
+        () =>
+          setPhase(
+            'Sonuçlar kaydediliyor; kayıt bağlantısı yeniden deneniyor.',
+          ),
       );
+    }
   }
   function downloadCategories() {
     if (!dict || !sourceHash.current) return;
@@ -442,7 +474,8 @@ export default function Home() {
           requestBudget:
             kind === 'classification'
               ? Math.ceil(
-                  ((dict?.count || 0) * AXES.length) / QUESTIONS_PER_REQUEST,
+                  ((dict?.count || 0) * AXES.length * QUESTIONS_PER_CELL) /
+                    QUESTIONS_PER_REQUEST,
                 )
               : Number(budget),
           repetitionGuard,
@@ -498,6 +531,7 @@ export default function Home() {
       summary: 'Jev yanıtı bekleniyor…',
     };
     logOperation(operation);
+    const timeout = AbortSignal.timeout(30000);
     try {
       const r = await fetch('/api/decision', {
         method: 'POST',
@@ -506,7 +540,7 @@ export default function Home() {
           'x-typesafe-key': keyRef.current.trim(),
         },
         body: JSON.stringify({ state, questions }),
-        signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]),
+        signal: AbortSignal.any([signal, timeout]),
       });
       const data = await r.json();
       if (!r.ok)
@@ -538,7 +572,7 @@ export default function Home() {
                     .split('Examples:')[0]
                     .slice(0, 100)
                 : preparationActive.current
-                  ? `${(state as { targets?: { word: string; dimension: string }[] }).targets?.[Number(qid.slice(1))]?.word || qid} · ${(state as { targets?: { dimension: string }[] }).targets?.[Number(qid.slice(1))]?.dimension || ''}: ${questions[qid].criteria[a.choice] || a.choice}`
+                  ? `${questions[qid].instructions.split('. ').slice(0, 2).join(' · ')}: ${questions[qid].criteria[a.choice] || a.choice}`
                   : a.choice,
           )
           .join(' / ') +
@@ -569,7 +603,7 @@ export default function Home() {
         ms: Date.now() - at,
         summary,
       });
-      if (!signal.aborted && e instanceof Error && e.name === 'TimeoutError') {
+      if (!signal.aborted && timeout.aborted) {
         throw new ProviderError(
           'Jev isteği zaman aşımına uğradı; sınırlı yeniden deneme yapılacak.',
           408,
@@ -736,6 +770,7 @@ export default function Home() {
       .filter(([w]) => !isComplete(restored[w]))
       .map(([w]) => w);
     let done = 0;
+    const checkpoints = new CategoryCheckpoints(saveCategories);
     beginRecording(
       'classification',
       `${words.length} İngilizce kelimenin eksik boyutlarını 36 boyutlu şemayla tara (${TAXONOMY_VERSION})`,
@@ -775,7 +810,7 @@ export default function Home() {
             answer: `${done} tamamlanan kelime adımı; 36 boyutlu tarama sürüyor. Son grup: ${JSON.stringify(result)}`,
           });
           setOverrides((old) => ({ ...old, ...result }));
-          await saveCategories(result);
+          await checkpoints.save(result);
           const unsaved = { ...pendingCategories.current };
           for (const word of Object.keys(result)) delete unsaved[word];
           pendingCategories.current = Object.keys(unsaved).length
@@ -995,7 +1030,7 @@ export default function Home() {
               options={[
                 ['8', 'En fazla 8'],
                 ['16', 'En fazla 16'],
-                ['32', 'En fazla 32 · otomatik satürasyon'],
+                ['32', 'En fazla 32 · otomatik hız'],
               ]}
             />
             <Button
@@ -1026,16 +1061,18 @@ export default function Home() {
             </Button>
           </div>
           <p>
-            Toplam {number(dict?.count || 0)} kelime. Kalan hazırlık yaklaşık{' '}
+            Toplam {number(dict?.count || 0)} kelime. Kalan hazırlık en az{' '}
             {number(
               Math.ceil(
-                ((dict?.count || 0) * AXES.length - scannedCount) /
+                (((dict?.count || 0) * AXES.length - scannedCount) *
+                  QUESTIONS_PER_CELL) /
                   QUESTIONS_PER_REQUEST,
               ),
             )}{' '}
-            TypeSafe isteği gerektirir (36 boyutlu tarama) ve API kullanımına
-            yansır. Bu uzun işlem sırasında sayfayı açık tut. Durdurur veya
-            kapatırsan kaydedilen kelimelerden devam edilir.
+            TypeSafe isteği gerektirir (36 boyut; paketler veri boyutuna göre
+            bölünür) ve API kullanımına yansır. Bu uzun işlem sırasında sayfayı
+            açık tut. Durdurur veya kapatırsan kaydedilen kelimelerden devam
+            edilir.
           </p>
           <p>
             {number(throughput.tokensPerSecond)} giriş tokenı/sn (son 5 sn) ·
@@ -1045,8 +1082,8 @@ export default function Home() {
           </p>
           <p>
             {activeRequests} / {parallelism} etkin Jev isteği · istek başına en
-            fazla 32 soru paralel değerlendirilir. Token/istek sınırlarında
-            kuyruk yavaşlar ve yeniden dener.
+            fazla {QUESTIONS_PER_REQUEST} küçük soru paralel değerlendirilir.
+            Token/istek sınırlarında kuyruk yavaşlar ve yeniden dener.
           </p>
           <p>
             Kelime tahmini tüm sözlük tamamlanınca açılır. Aşağıdaki istek
