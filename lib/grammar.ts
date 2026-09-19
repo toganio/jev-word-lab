@@ -1,7 +1,5 @@
 import exceptions from './inflection-exceptions.json';
 import { AXES, selectedLabels, type CategoryMap } from './categories';
-import type { Evaluate, Question, Trace } from './types';
-import { STOP } from './dictionary';
 
 /** Spelling candidates only. Jev must approve context and choose the emitted form. */
 export function inflectedCandidates(
@@ -57,10 +55,10 @@ export function expandCandidates(
   common: string[],
   prepared?: CategoryMap,
 ): string[] {
-  const chosen = new Set([...bases.slice(0, 48), ...common.slice(0, 110)]);
+  const chosen = new Set([...bases.slice(0, 120), ...common.slice(0, 110)]);
   if (prepared) {
     const variants = bases
-      .slice(0, 48)
+      .slice(0, 120)
       .map((w) => inflectedCandidates(w, prepared));
     for (let i = 0; i < 8 && chosen.size < 248; i++) {
       for (const forms of variants) {
@@ -72,59 +70,6 @@ export function expandCandidates(
   return [...chosen];
 }
 
-/** All validity judgments and completion checks are independent questions answered by Jev. */
-export async function reviewGrammar(
-  state: unknown,
-  candidates: string[],
-  evaluate: Evaluate,
-  signal: AbortSignal,
-): Promise<{ allowed: Set<string>; trace: Trace }> {
-  signal.throwIfAborted();
-  const grammarState = {
-    ...(state as Record<string, unknown>),
-    grammar_rules:
-      'Judge whether the exact candidate token can follow reply_so_far as a grammatical English reply. Check spelling, subject-verb and number agreement, articles, word order, verb forms and sentence boundaries. A partial clause is allowed if a valid completion remains possible. Start a NEW assistant sentence, not a continuation of the user question. Reject malformed inflections. Do not require each token to finish the answer. This is a validity check, not a preference ranking.',
-  };
-  const questions: Record<string, Question> = {};
-  candidates.forEach((word, i) => {
-    questions[`v${i}`] = {
-      type: 'choice',
-      instructions:
-        word === STOP
-          ? 'Does reply_so_far already answer the latest user request with useful specific information, in complete grammatical English? For a how-to, require actionable steps; for why, an actual explanation. A vague restatement is not complete. Judge only the existing reply.'
-          : `Apply state.grammar_rules: can exactly ${JSON.stringify(word)} be appended as a grammatical next token?`,
-      criteria: { allow: 'Yes', reject: 'No' },
-    };
-  });
-  const response = await evaluate(grammarState, questions, signal);
-  const allowed = new Set<string>();
-  const excluded: { word: string; reason: string }[] = [];
-  candidates.forEach((word, i) => {
-    const a = response.answers[`v${i}`];
-    if (!a || !['allow', 'reject'].includes(a.choice))
-      throw new Error('Invalid Jev grammar decision.');
-    if (a.choice === 'allow') allowed.add(word);
-    else
-      excluded.push({
-        word,
-        reason:
-          word === STOP
-            ? 'Jev: reply is not complete or useful yet'
-            : 'Jev: not a grammatical continuation',
-      });
-  });
-  return {
-    allowed,
-    trace: {
-      stage: 'Jev grammar review',
-      path: 'Independent validity checks before final selection',
-      options: candidates.length,
-      candidates: candidates.slice(0, 8).map((word, i) => ({
-        label: word === STOP ? '[End reply]' : word,
-        probability: response.answers[`v${i}`].probabilities.allow,
-        retained: allowed.has(word),
-      })),
-      excluded,
-    },
-  };
-}
+/** Guidance for one comparative choice, never an independent candidate veto. */
+export const GRAMMAR_GUIDANCE =
+  'Compare candidate continuations in context. Respect subject-verb and noun-number agreement, article choice (a/an), verb forms and word order. Prefer the form that fits the existing clause. Do not restart, revise, or repeat words already written. Follow the requested short-sentence plan. Ending does not require an exhaustive explanation; prefer ending early to padding the reply with filler.';

@@ -146,6 +146,7 @@ export default function Home() {
     [loadError, setLoadError] = useState('');
   const [repetitionGuard, setRepetitionGuard] = useState(true);
   const [grammarReview, setGrammarReview] = useState(true);
+  const [targetSentences, setTargetSentences] = useState('3');
   const treeCache = useRef<{
     dict: Dictionary;
     prepared: CategoryMap;
@@ -471,6 +472,7 @@ export default function Home() {
           limit: Number(limit),
           beam: Number(beam),
           maxWords: Number(maxWords),
+          targetSentences: Number(targetSentences),
           requestBudget:
             kind === 'classification'
               ? Math.ceil(
@@ -510,7 +512,7 @@ export default function Home() {
       at = Date.now();
     const entries = Object.entries(questions);
     const label = entries[0][0].startsWith('v')
-      ? 'Jev grammar review'
+      ? 'Jev grammar guidance'
       : questions.next
         ? 'Finalist comparison'
         : questions.check
@@ -704,6 +706,7 @@ export default function Home() {
         history,
         beam: Number(beam),
         maxWords: Number(maxWords),
+        targetSentences: Number(targetSentences),
         repetitionGuard,
         grammarReview,
         prepared: overrides,
@@ -718,7 +721,7 @@ export default function Home() {
             logOperation({
               id,
               label:
-                trace.stage === 'Jev grammar review'
+                trace.stage === 'Jev grammar guidance'
                   ? 'Jev grammar decisions'
                   : 'Repetition guard · application filter',
               status: 'done',
@@ -906,6 +909,7 @@ export default function Home() {
         limit: Number(limit),
         beam: Number(beam),
         maxWords: Number(maxWords),
+        targetSentences: Number(targetSentences),
         repetitionGuard,
         grammarReview,
         parallelism: Number(parallelism),
@@ -1225,11 +1229,11 @@ export default function Home() {
             onCheckedChange={setGrammarReview}
             disabled={isBusy}
           />
-          <label htmlFor="grammar-review">Jev grammar review</label>
+          <label htmlFor="grammar-review">Jev grammar guidance</label>
           <span>
             {grammarReview
-              ? 'Adds inflected candidates. Jev checks grammar and reply completeness in parallel before choosing. Uses additional API questions.'
-              : 'Raw selection: no inflection expansion or grammar review.'}
+              ? 'Jev compares grammar and meaning in the final word choice. Ending stays available; no extra filtering requests.'
+              : 'Raw selection: no inflection expansion or additional grammar guidance.'}
           </span>
         </div>
         <div className="experiment-settings">
@@ -1242,6 +1246,16 @@ export default function Home() {
               ['1', '1 path · fast'],
               ['3', '3 paths · balanced'],
               ['5', '5 paths · broad'],
+            ]}
+          />
+          <Picker
+            label="Reply style"
+            value={targetSentences}
+            onChange={setTargetSentences}
+            disabled={isBusy}
+            options={[
+              ['3', 'Three short sentences'],
+              ['1', 'One short sentence'],
             ]}
           />
           <Picker
@@ -1502,8 +1516,8 @@ export default function Home() {
                 <div className="method-note">
                   <GitBranch size={18} />
                   <p>
-                    Category → subgroups → grammar → word. Questions run in
-                    parallel; each has up to 255 options.
+                    Category → prefix groups → word and grammar comparison.
+                    Questions run in parallel; each has up to 255 options.
                   </p>
                 </div>
               </TabsContent>
