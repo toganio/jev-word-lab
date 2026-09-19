@@ -1,6 +1,6 @@
 import type { Message, Stats, Step } from './types';
 import { MAX_CONCURRENCY } from './parallel';
-export const APP_VERSION = 'jev-lab-9-dictionary-keys';
+export const APP_VERSION = 'jev-lab-10-english-grammar';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'error';
 export type RecordedOperation = {
   id: number;
@@ -28,6 +28,7 @@ export type RunRecord = {
     maxWords: number;
     requestBudget: number;
     repetitionGuard: boolean;
+    grammarReview?: boolean;
     parallelism?: number;
   };
   conversation: Message[];
@@ -91,6 +92,9 @@ export function sanitizeRecord(input: any): RunRecord {
         input.kind === 'classification' ? 500000 : 400,
       ),
       repetitionGuard: settings.repetitionGuard,
+      ...(typeof settings.grammarReview === 'boolean'
+        ? { grammarReview: settings.grammarReview }
+        : {}),
       ...(typeof settings.parallelism === 'number'
         ? { parallelism: num(settings.parallelism, MAX_CONCURRENCY) }
         : {}),

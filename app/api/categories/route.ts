@@ -63,7 +63,7 @@ export async function GET(request: Request) {
       (s.taxonomy_version !== TAXONOMY_VERSION ||
         s.source_sha256 !== SOURCE_SHA256)
     )
-      return fail('Kategori oturumu eşleşmiyor.', 409);
+      return fail('Category session mismatch.', 409);
     if (url.searchParams.get('status') === '1')
       return Response.json(await summary(db, s), { headers });
     const cursor = url.searchParams.get('after') || '';
@@ -91,13 +91,13 @@ export async function GET(request: Request) {
       { headers },
     );
   } catch {
-    return fail('Kategori oturumu yüklenemedi veya doğrulanamadı.', 503);
+    return fail('Could not load or validate the category session.', 503);
   }
 }
 export async function POST(request: Request) {
   const origin = request.headers.get('origin');
   if (origin && origin !== new URL(request.url).origin)
-    return fail('İstek kaynağı geçersiz.', 403);
+    return fail('Invalid request origin.', 403);
   let input, categories;
   try {
     const raw = await request.text();
@@ -117,7 +117,7 @@ export async function POST(request: Request) {
         throw new Error();
     }
   } catch {
-    return fail('Kategori kaydı geçersiz.');
+    return fail('Invalid category record.');
   }
   try {
     const db = await database();
@@ -152,7 +152,7 @@ export async function POST(request: Request) {
       s.source_sha256 !== SOURCE_SHA256 ||
       s.taxonomy_version !== TAXONOMY_VERSION
     )
-      return fail('Kategori oturumu eşleşmiyor.', 409);
+      return fail('Category session mismatch.', 409);
     // All cells are validated before recording. Partial rows are never marked complete.
     // A word only grows in scanned coverage; retries cannot replace a more complete row.
     await db.batch(
@@ -174,7 +174,7 @@ export async function POST(request: Request) {
     return Response.json({ saved: true }, { headers });
   } catch {
     return fail(
-      'Kategori oturumu kaydedilemedi. Hazırlığı yeniden deneyebilirsin.',
+      'Could not save the category session. Try preparation again.',
       503,
     );
   }

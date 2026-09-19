@@ -42,20 +42,31 @@ export function validateCategoryFile(
     file.taxonomyVersion !== TAXONOMY_VERSION ||
     file.sourceSha256 !== sourceSha256 ||
     file.dictionaryCount !== dictionaryWords.length ||
-    JSON.stringify(file.definitions) !== JSON.stringify(AXIS_DEFINITIONS)
+    JSON.stringify(
+      file.definitions?.map(({ id, tags, guidance }) => ({
+        id,
+        tags,
+        guidance,
+      })),
+    ) !==
+      JSON.stringify(
+        AXIS_DEFINITIONS.map(({ id, tags, guidance }) => ({
+          id,
+          tags,
+          guidance,
+        })),
+      )
   )
     throw new Error(
-      'Dosyanın sözlüğü veya 36 boyutlu şeması bu uygulamayla eşleşmiyor.',
+      'File dictionary or 36-axis schema does not match this application.',
     );
   const map = sanitizeCategories(file.categories);
   const words = new Set(dictionaryWords);
   if (Object.keys(map).some((w) => !words.has(w)))
-    throw new Error('Dosyada sözlüğün dışında kelime var.');
+    throw new Error('File contains a word outside the dictionary.');
   const complete = dictionaryWords.every((w) => isComplete(map[w]));
   if (file.complete !== complete)
-    throw new Error(
-      'Dosyanın tamamlanma iddiası gerçek kapsamıyla eşleşmiyor.',
-    );
+    throw new Error('File completion flag does not match its coverage.');
   return map;
 }
 export function scannedCells(map: CategoryMap) {

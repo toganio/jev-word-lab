@@ -4,15 +4,15 @@ An English dictionary-constrained conversation experiment using TypeSafe AI's `j
 
 ## Start
 
-Node 22.13+ is required. Run `npm install`, then `npm run dev`. Enter your TypeSafe API key in the password field and click **Bağlan**. A single real choice request verifies access. Keys live only in the browser component's memory and are forwarded over the same-origin backend to TypeSafe. They are not saved, logged, or included in exports. Do not put a shared key in client code.
+Node 22.13+ is required. Run `npm install`, then `npm run dev`. Enter your TypeSafe API key in the password field and click **Connect**. A single real choice request verifies access. Keys live only in the browser component's memory and are forwarded over the same-origin backend to TypeSafe. They are not saved, logged, or included in exports. Do not put a shared key in client code.
 
-First use **Kategorize Dosyası Oluştur** to scan the entire dictionary across 36 dimensions, or upload a compatible category file. Word prediction stays locked until full coverage is verified. Then choose retained paths, output limit and prediction request budget and start word prediction. Every displayed decision is a real API response. Missing/invalid keys never generate mock answers.
+First use **Create category file** to scan the entire dictionary across 36 dimensions, or upload a compatible category file. Word prediction stays locked until full coverage is verified. Then choose retained paths, output limit and prediction request budget and start word prediction. Every displayed decision is a real API response. Missing/invalid keys never generate mock answers.
 
 ## Dictionary and grouping
 
 `public/data/words.txt` is the downloadable flat list. `dictionary.json` indexes the same words by Princeton WordNet 3.0 lexical categories, with closed-class function words and exception-table inflections added. WordNet's tagged usage counts determine ordering, not a modern conversation corpus. The source archive is available from https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/wordnet.zip. Rebuild with `python3 scripts/build-dictionary.py /path/to/wordnet.zip`. The original license is included in `public/data/WORDNET-LICENSE.txt`.
 
-The browser downloads the dictionary once per page load and indexes it in memory. Each category is split recursively by word prefix until groups contain at most 200 words. Jev scores category and subgroup choices; a configurable beam keeps multiple paths. Conditional path probabilities are multiplied before pruning. Top words from leaf groups and common function words are compared again in one final choice. Punctuation and an explicit stop action are available. All choice calls stay under the 255-option limit. Final probabilities are conditional on the finalists, not probabilities over the entire dictionary.
+The browser downloads the dictionary once per page load and indexes it in memory. Each category is split into balanced alphabetical ranges until groups contain at most 200 words; redundant levels are compacted without dropping memberships. Jev scores category and subgroup choices; a configurable beam keeps multiple paths. Conditional path probabilities are multiplied before pruning. Top words from leaf groups and common function words are compared again in one final choice. Punctuation and an explicit stop action are available. All choice calls stay under the 255-option limit. Final probabilities are conditional on the finalists, not probabilities over the entire dictionary.
 
 The original WordNet taxonomy is retained as dictionary metadata. Prediction now uses only the prepared 36-dimensional map, with multiple memberships per dimension. Category definitions and example structures are application-authored; Jev selects word memberships, including explicit not-applicable and uncertain results. These assessments count as scanned, without claiming linguistic certainty.
 
@@ -24,7 +24,7 @@ Each dimension has six nonexclusive tags, assessed in two independent groups of 
 
 D1 stores category sessions and per-word arrays after each successful request. Zero means unscanned; 1–63 encode selected tags; 128 is N/A; 256 is uncertain. Incomplete words resume at missing dimensions. The server checks every uploaded word against a pinned dictionary manifest and validates all 36 cells, session, and schema. The complete-word and scanned-cell counts gate prediction. All records are bounded and paginated on reload. Older 4-axis or single-axis data is not silently promoted to complete.
 
-**Kategori dosyasını indir** produces a JSON artifact with the schema, source SHA-256, dictionary count, per-word bitsets and honest coverage flag. A partial file can also be downloaded. Upload validates the entire artifact before creating a separate persisted session, then saves bounded batches. Missing or malformed dimensions, a mismatched dictionary/schema, unknown words, or a false complete flag are rejected. A compatible complete file requires no model call to reuse. A partial import can resume with Jev. The source fingerprint verifies dictionary identity; it is not an authenticity signature proving who authored an imported artifact.
+**Download category file** produces a JSON artifact with the schema, source SHA-256, dictionary count, per-word bitsets and honest coverage flag. A partial file can also be downloaded. Upload validates the entire artifact before creating a separate persisted session, then saves bounded batches. Missing or malformed dimensions, a mismatched dictionary/schema, unknown words, or a false complete flag are rejected. A compatible complete file requires no model call to reuse. A partial import can resume with Jev. The source fingerprint verifies dictionary identity; it is not an authenticity signature proving who authored an imported artifact.
 
 The private `GET /api/categories` endpoint pages up to 1,000 word records; `?status=1` returns session/coverage metadata. `POST /api/categories` creates/resumes a session or checkpoints up to 100 validated words. These routes inherit the owner-private Sites gate. They never receive a TypeSafe key. No background paid calls continue after the page closes.
 
@@ -90,7 +90,7 @@ Dimension batching, three overlapping cohorts, and two disjoint storage writes i
 
 The longer final trial completed 1,377 successful requests and 132,192 new dimension cells, consuming 26,917,245 input tokens (292,356/s including drain). Its two 429 responses were retried using shared backoff; there was no terminal failure. Median request latency was 2,104 ms and p95 was 2,364 ms. The higher 500,000 target added retries with negligible throughput improvement, so the default retains 350,000 with adaptive backoff. A separate earlier 96-worker trial had a hanging transport at shutdown and is excluded from speed comparisons; whole-response cancellation is now bounded, including response-body reads.
 
-Every successful returned classification was persisted. Word-equivalents are new scanned cells / 36, including partial words; the final trial completed 3,648 whole words and left additional partial progress. This is a bounded measurement from the developer host through the deployed API, not a guarantee of browser throughput, a linguistic accuracy evaluation, or a permanent provider maximum. The total session then contained 15,983 complete words and 577,788 scanned cells; the full dictionary remains incomplete.
+Every successful returned classification was persisted. Word-equivalents are new scanned cells / 36, including partial words; the final trial completed 3,648 whole words and left additional partial progress. This is a bounded measurement from the developer host through the deployed API, not a guarantee of browser throughput, a linguistic accuracy evaluation, or a permanent provider maximum. The total session then contained 15,983 complete words and 577,788 scanned cells; the dictionary was still incomplete at that point. The later complete snapshot is included below.
 
 1,200 in the provider documentation is requests **per minute**, not concurrency. Rate limits are dynamic. The runtime retains adaptive pacing and bounded retries. API credentials and raw experiment records are excluded from this repository.
 
@@ -101,3 +101,27 @@ Two v7 user scans stopped on an upstream HTTP 520. Version 8 includes 520 in the
 ## Dictionary key correction (2026-09-19)
 
 The actual dictionary includes `constructor` (index 36,198). An unscanned word lookup on a plain object inherited JavaScript's native constructor; spreading that value stopped large scans with `is not iterable`. Small scans could also mistake the inherited value for a working assignment. Version 9 reads only own category properties, builds sequential working maps without a prototype, and requires an array for completion checks. The same large-cohort failure was reproduced offline before the fix. Regression tests cover the real dictionary neighborhood, small scans, partial resume, durable snapshots and JSON category-file reuse. Existing categories and file schema are unchanged; no paid model calls or stored-category edits were made for this fix.
+
+
+## English interface, faster search and Jev grammar review (2026-09-19)
+
+The interface, error messages, category labels and new operation traces are in English. Old category files remain compatible: presentation labels may differ, while axis order, IDs, tags, guidance, dictionary fingerprint and coverage must still match. Existing historical experiment text is not rewritten.
+
+Prediction uses balanced alphabetical ranges instead of long letter chains. All 87,776 words and 4,371,270 category memberships remain reachable. On the saved complete map, average serial routing depth fell from 5.66 to 4.43 (21.6% fewer routing levels); the maximum fell from 9 to 5. This is an offline structural measurement, not measured API speed. Broad beams can follow different paths. Shared instructions are sent once per state, and the prepared tree is reused between conversation turns instead of rebuilt each time.
+
+**Jev grammar review**, enabled by default, adds regular spelling candidates and WordNet exception forms to shortlisted base words. For example, `animal` can supply `animals`, and `make` can supply `makes`, `made` and `making`. Forms are spelling candidates, not new classified dictionary entries; the saved category file is unchanged. Only Jev chooses whether a candidate is valid and which token to emit. This is a bounded candidate generator, not an exhaustive English morphology system.
+
+Independent two-option Jev questions check candidate grammar in one parallel request. A separate question in that same batch checks whether the existing answer is both grammatical and useful enough to finish. Rejected options are shown in the trace and removed before Jev's final choice. If too few candidates pass, the run stops and retains its partial text; there is no replacement model or hand-written answer. These checks add API questions/tokens and usually one round trip per token. Turn the control off to compare raw routing. The optimization and checks have offline regression coverage; real model quality and latency need fresh user experiments and are not guaranteed.
+
+Automatic Codex review is paused. Saving an experiment to the private site's database is ordinary storage, not an AI call. Paid requests begin only through explicit user controls. No API key or private conversation is included in the public repository.
+
+## Download the complete classification
+
+- [Complete category file](data/jev-category-map-36-complete.json) — 87,776 words, 36 dimensions, 3,159,936 scanned cells (about 10.8 MB).
+- [Integrity and provenance metadata](data/category-map-metadata.json) — SHA-256 checksum and dictionary fingerprint.
+
+Download the raw JSON and select **Upload category file** in the app. Import makes no paid model calls. This is the user's authorized export of Jev's actual saved classifications; it includes explicit uncertainty and not-applicable labels. Complete coverage does not mean every label is correct. The snapshot excludes API keys, private session identifiers, and conversation logs. WordNet-derived vocabulary is covered by the included [WordNet license](public/data/WORDNET-LICENSE.txt).
+
+To regenerate an export from a locally available map, run `node scripts/export-category-file.mjs /path/to/category-map.json`. The helper validates full coverage and writes the checksum. To regenerate spelling exceptions, run `python3 scripts/build-inflections.py /path/to/wordnet.zip`.
+
+The batching design follows TypeSafe's documented [independent parallel questions](https://docs.typesafe.ai/introduction). Earlier throughput benchmarks above describe classification only; they are not word-prediction speed measurements.

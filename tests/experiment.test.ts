@@ -290,7 +290,7 @@ test('backend rejects a non-Jev upstream result and ignores client model overrid
       }),
     );
     assert.equal(res.status, 502);
-    assert.match(await res.text(), /yalnızca Jev/);
+    assert.match(await res.text(), /only uses Jev/);
   } finally {
     globalThis.fetch = original;
   }
@@ -1378,4 +1378,190 @@ test('request cancellation bounds a response body that never settles and does no
   } finally {
     globalThis.fetch = original;
   }
+});
+
+import {
+  inflectedCandidates,
+  expandCandidates,
+  reviewGrammar,
+} from '../lib/grammar';
+import { compactChildren } from '../lib/dictionary';
+
+test('compacting nested prefixes preserves words and removes serial decisions', () => {
+  const original = [
+    group('a', [
+      group('ab', [word('able'), word('about')]),
+      group('ac', [word('act'), word('acid')]),
+    ]),
+    group('b', [word('book'), word('boil')]),
+  ];
+  const compact = compactChildren(original);
+  assert.deepEqual(
+    new Set(compact.map((n) => (n.kind === 'word' ? n.word : 'group'))),
+    new Set(['able', 'about', 'act', 'acid', 'book', 'boil']),
+  );
+  assert.equal(compact.length, 6);
+});
+
+function grammaticalMap(entries: [string, number, number][]): CategoryMap {
+  return Object.fromEntries(
+    entries.map(([w, type, inflection]) => {
+      const a = Array(36).fill(128);
+      a[AXES.indexOf('type')] = type;
+      a[AXES.indexOf('inflection')] = inflection;
+      return [w, a];
+    }),
+  );
+}
+
+test('missing plurals and verb forms are candidates only, and remain bounded', () => {
+  const map = grammaticalMap([
+    ['animal', 1, 1],
+    ['book', 1, 1],
+    ['child', 1, 1],
+    ['go', 2, 4],
+    ['boil', 2, 4],
+    ['stop', 2, 4],
+    ['make', 2, 4],
+  ]);
+  assert.ok(inflectedCandidates('animal', map).includes('animals'));
+  assert.ok(inflectedCandidates('child', map).includes('children'));
+  assert.ok(inflectedCandidates('go', map).includes('went'));
+  assert.ok(inflectedCandidates('boil', map).includes('boils'));
+  assert.ok(inflectedCandidates('stop', map).includes('stopped'));
+  assert.ok(inflectedCandidates('make', map).includes('making'));
+  assert.deepEqual(inflectedCandidates('unknown', map), []);
+  assert.deepEqual(inflectedCandidates('constructor', {}), []);
+  const many = grammaticalMap(
+    Array.from({ length: 48 }, (_, i) => [
+      'word' +
+        String.fromCharCode(97 + (i % 26)) +
+        String.fromCharCode(97 + Math.floor(i / 26)),
+      3,
+      5,
+    ]),
+  );
+  assert.ok(
+    expandCandidates(
+      Object.keys(many),
+      Array.from({ length: 110 }, (_, i) => 'common' + i),
+      many,
+    ).length <= 248,
+  );
+});
+
+test('parallel Jev validity decisions exclude invalid grammar and premature stopping before final selection', async () => {
+  const root = group('root', [word('animal'), word('cat')]);
+  const prepared = grammaticalMap([
+    ['animal', 1, 1],
+    ['cat', 1, 1],
+  ]);
+  const sequence = ['they', 'are', 'animals', STOP];
+  let index = 0,
+    grammarCalls = 0;
+  const evaluate: Evaluate = async (state: any, qs) => {
+    validateRequest({ state, questions: qs });
+    assert.ok(JSON.stringify({ state, questions: qs }).length < 90000);
+    if (Object.keys(qs)[0].startsWith('v')) {
+      grammarCalls++;
+      return answer(qs, (_id, q) => ({
+        [q.instructions.includes('exactly "animal"') ||
+        (q.instructions.startsWith('Does reply') && index < 3)
+          ? 'reject'
+          : 'allow']: 1,
+      }));
+    }
+    if (qs.next) {
+      assert.ok(!Object.hasOwn(qs.next.criteria, 'animal'));
+      if (index < 3) assert.ok(!Object.hasOwn(qs.next.criteria, STOP));
+      assert.ok(Object.hasOwn(qs.next.criteria, sequence[index]));
+      return answer(qs, () => ({ [sequence[index++]]: 1 }));
+    }
+    return answer(qs, () => ({ o0: 0.9, o1: 0.1 }));
+  };
+  const result = await generate({
+    root,
+    common: ['they', 'are', 'the'],
+    history: [{ role: 'user', content: 'Tell me about cats.' }],
+    beam: 1,
+    maxWords: 8,
+    grammarReview: true,
+    prepared,
+    signal: new AbortController().signal,
+    evaluate,
+    onPhase: () => {},
+    onStep: () => {},
+  });
+  assert.equal(result.text, 'They are animals');
+  assert.equal(grammarCalls, 4);
+});
+
+test('grammar rejection fails closed and does not emit an assistant-authored substitute', async () => {
+  let emitted = false;
+  await assert.rejects(
+    generate({
+      root: group('root', [word('cat'), word('book')]),
+      common: [],
+      history: [],
+      beam: 1,
+      maxWords: 2,
+      grammarReview: true,
+      signal: new AbortController().signal,
+      evaluate: async (_state, qs) =>
+        answer(
+          qs,
+          (id): Record<string, number> =>
+            id.startsWith('v') ? { reject: 1 } : { o0: 1 },
+        ),
+      onPhase: () => {},
+      onStep: () => {
+        emitted = true;
+      },
+    }),
+    /too few grammatical/,
+  );
+  assert.equal(emitted, false);
+});
+
+test('grammar batch supports all 255 candidates in one bounded request and respects cancellation', async () => {
+  const candidates = Array.from(
+    { length: 254 },
+    (_, i) => 'candidate' + i,
+  ).concat(STOP);
+  let calls = 0;
+  const evaluate: Evaluate = async (state, qs) => {
+    calls++;
+    validateRequest({ state, questions: qs });
+    assert.ok(
+      Buffer.byteLength(JSON.stringify({ state, questions: qs })) < 90000,
+    );
+    return answer(qs, () => ({ allow: 1 }));
+  };
+  const reviewed = await reviewGrammar(
+    { reply_so_far: 'They are animals.' },
+    candidates,
+    evaluate,
+    new AbortController().signal,
+  );
+  assert.equal(reviewed.allowed.size, 255);
+  assert.equal(calls, 1);
+  const c = new AbortController();
+  c.abort();
+  await assert.rejects(reviewGrammar({}, candidates, evaluate, c.signal));
+  assert.equal(calls, 1);
+});
+
+test('old category files remain compatible after translating presentation labels, but semantic changes are rejected', () => {
+  const map = grammaticalMap([
+      ['animal', 1, 1],
+      ['book', 1, 1],
+    ]),
+    words = Object.keys(map);
+  const file = JSON.parse(JSON.stringify(makeCategoryFile(map, 'hash', words)));
+  file.definitions.forEach((d: any) => {
+    d.label = 'Previous translated label';
+  });
+  assert.deepEqual(validateCategoryFile(file, 'hash', words), map);
+  file.definitions[0].tags[0] = 'different-meaning';
+  assert.throws(() => validateCategoryFile(file, 'hash', words));
 });

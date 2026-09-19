@@ -3,13 +3,13 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Jev Word Lab',
   description:
-    'İngilizce sözlük üzerinde TypeSafe Jev ile kategori, grup ve kelime seçimini test et.',
+    'Explore category, group, and word selection with TypeSafe Jev and an English dictionary.',
 };
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="tr">
+    <html lang="en">
       <body>{children}</body>
     </html>
   );

@@ -1,0 +1,13 @@
+{
+  "file": "jev-category-map-36-complete.json",
+  "sha256": "fb951cb10dac9454c35241d3e1941eaa0446d208064878c15cd585b9d6fc3ba3",
+  "dictionarySha256": "a26d7d25b3656a215b02bf5473a5532b18235f97b450c4d68a4b0c507c853006",
+  "words": 87776,
+  "dimensions": 36,
+  "scannedCells": 3159936,
+  "complete": true,
+  "model": "jev-latest",
+  "source": "User-authorized export of saved Jev classifications",
+  "exportedAt": "2026-09-19T09:35:59.099Z",
+  "note": "Coverage is complete; classifications may be uncertain or incorrect. Contains no API keys, conversation logs or session identifiers."
+}

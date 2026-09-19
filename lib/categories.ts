@@ -16,14 +16,14 @@ export const CATEGORY_REQUEST_BYTES = 90000;
 export const AXIS_DEFINITIONS = [
   {
     id: 'meaning',
-    label: 'Anlam alanı',
+    label: 'Meaning',
     tags: ['living', 'nature', 'objects', 'mind', 'society', 'structure'],
     guidance:
       'Living beings; natural world; made objects; mental life; social life; grammatical or logical structure.',
   },
   {
     id: 'topic',
-    label: 'Alt konu',
+    label: 'Topic',
     tags: [
       'food/health',
       'home/travel',
@@ -37,7 +37,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'senses',
-    label: 'Farklı anlamlar',
+    label: 'Senses',
     tags: [
       'literal',
       'figurative',
@@ -51,20 +51,20 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'abstractness',
-    label: 'Soyutluk',
+    label: 'Abstractness',
     tags: ['concrete', 'abstract', 'event', 'quality', 'relation', 'mixed'],
     guidance:
       'Physical referent versus concept, event, quality or relation; mixed when senses differ.',
   },
   {
     id: 'entity',
-    label: 'Varlık türü',
+    label: 'Entity type',
     tags: ['person/animal', 'object', 'place', 'event', 'process', 'concept'],
     guidance: 'What the word can denote in its attested senses.',
   },
   {
     id: 'action',
-    label: 'Eylem türü',
+    label: 'Action type',
     tags: [
       'motion',
       'mental',
@@ -78,7 +78,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'property',
-    label: 'Durum ve özellik',
+    label: 'Properties',
     tags: [
       'appearance',
       'size/shape',
@@ -91,7 +91,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'relations',
-    label: 'Anlamsal ilişkiler',
+    label: 'Semantic relations',
     tags: [
       'similarity',
       'opposition',
@@ -105,7 +105,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'type',
-    label: 'Sözcük türü',
+    label: 'Part of speech',
     tags: [
       'noun',
       'verb',
@@ -119,7 +119,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'structure',
-    label: 'Sözcük yapısı',
+    label: 'Word structure',
     tags: [
       'root',
       'derived',
@@ -133,21 +133,21 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'inflection',
-    label: 'Çekim biçimi',
+    label: 'Inflection',
     tags: ['singular', 'plural', 'base', 'past', 'participle', 'comparative'],
     guidance:
       'Grammatical forms, including comparative/superlative; exact form may have multiple analyses.',
   },
   {
     id: 'countability',
-    label: 'Sayılabilirlik',
+    label: 'Countability',
     tags: ['count', 'mass', 'both', 'plural-only', 'proper-name', 'contextual'],
     guidance:
       'Noun countability; water is usually mass but can mean servings. Other word classes may be not applicable.',
   },
   {
     id: 'agreement',
-    label: 'Kişi ve sayı uyumu',
+    label: 'Agreement',
     tags: [
       'first-person',
       'second-person',
@@ -161,14 +161,14 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'tense',
-    label: 'Zaman',
+    label: 'Tense',
     tags: ['past', 'present', 'future', 'timeless', 'relative', 'contextual'],
     guidance:
       'Tense or temporal reference actually signaled by the word; not every noun has a tense.',
   },
   {
     id: 'aspect',
-    label: 'Görünüş',
+    label: 'Aspect',
     tags: [
       'ongoing',
       'completed',
@@ -182,7 +182,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'modality',
-    label: 'Kip ve olasılık',
+    label: 'Modality',
     tags: [
       'ability',
       'possibility',
@@ -195,7 +195,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'valency',
-    label: 'Fiilin aldığı öğeler',
+    label: 'Valency',
     tags: [
       'intransitive',
       'transitive',
@@ -209,7 +209,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'voice',
-    label: 'Etkenlik ve edilgenlik',
+    label: 'Voice',
     tags: [
       'active',
       'passive',
@@ -223,7 +223,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'role',
-    label: 'Cümledeki görev',
+    label: 'Sentence role',
     tags: [
       'subject',
       'object',
@@ -237,7 +237,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'noun_phrase',
-    label: 'İsim grubundaki görev',
+    label: 'Noun phrase role',
     tags: [
       'determiner',
       'head',
@@ -251,7 +251,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'verb_phrase',
-    label: 'Fiil grubundaki görev',
+    label: 'Verb phrase role',
     tags: [
       'main-verb',
       'auxiliary',
@@ -265,7 +265,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'preceding',
-    label: 'Öncesinde beklenen yapı',
+    label: 'Preceding structure',
     tags: [
       'determiner',
       'subject',
@@ -279,7 +279,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'following',
-    label: 'Sonrasında beklenen yapı',
+    label: 'Following structure',
     tags: [
       'noun-phrase',
       'base-verb',
@@ -293,7 +293,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'position',
-    label: 'Konum esnekliği',
+    label: 'Position',
     tags: [
       'sentence-start',
       'sentence-middle',
@@ -306,7 +306,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'collocation',
-    label: 'Birlikte kullanım',
+    label: 'Collocation',
     tags: [
       'verb+noun',
       'adj+noun',
@@ -320,7 +320,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'complement',
-    label: 'Edat ve yapı eşleşmesi',
+    label: 'Complements',
     tags: [
       'to-infinitive',
       'ing-clause',
@@ -334,7 +334,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'logic',
-    label: 'Mantıksal ilişki',
+    label: 'Logic',
     tags: [
       'cause',
       'result',
@@ -347,20 +347,20 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'sequence',
-    label: 'Zaman ve sıra ilişkisi',
+    label: 'Sequence',
     tags: ['before', 'after', 'during', 'beginning', 'ending', 'repetition'],
     guidance: 'Temporal ordering or repetition expressed by the word.',
   },
   {
     id: 'intent',
-    label: 'Konuşma amacı',
+    label: 'Intent',
     tags: ['question', 'answer', 'request', 'advice', 'explanation', 'social'],
     guidance:
       'Communicative purposes the word commonly supports. Social includes greeting, apology, thanks.',
   },
   {
     id: 'answer_role',
-    label: 'Yanıttaki işlev',
+    label: 'Answer role',
     tags: [
       'definition',
       'example',
@@ -374,21 +374,21 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'procedure',
-    label: 'İşlem anlatımındaki rol',
+    label: 'Procedure',
     tags: ['ingredient', 'tool', 'action', 'duration', 'condition', 'result'],
     guidance:
       'Procedural role: water as ingredient, kettle as tool, heat as action, minutes as duration.',
   },
   {
     id: 'reference',
-    label: 'Gönderim',
+    label: 'Reference',
     tags: ['person', 'thing', 'place', 'time', 'previous-idea', 'generic'],
     guidance:
       'Reference/deixis: she, it, here, then, this, one. Content nouns may be generic or not applicable.',
   },
   {
     id: 'sentiment',
-    label: 'Duygu ve değerlendirme',
+    label: 'Sentiment',
     tags: [
       'positive',
       'negative',
@@ -402,7 +402,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'certainty',
-    label: 'Kesinlik ve kanıt',
+    label: 'Certainty',
     tags: [
       'certain',
       'probable',
@@ -416,7 +416,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'register',
-    label: 'Üslup ve kullanım ortamı',
+    label: 'Register',
     tags: [
       'everyday',
       'formal',
@@ -430,7 +430,7 @@ export const AXIS_DEFINITIONS = [
   },
   {
     id: 'frequency',
-    label: 'Yaygınlık ve doğallık',
+    label: 'Frequency',
     tags: ['common', 'uncommon', 'rare', 'archaic', 'regional', 'specialized'],
     guidance:
       'Qualitative usage estimate, not measured corpus frequency. Choose uncertain if unsupported.',

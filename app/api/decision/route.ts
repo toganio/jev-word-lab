@@ -9,21 +9,18 @@ export async function POST(request: Request) {
     Response.json({ error }, { status, headers });
   const origin = request.headers.get('origin');
   if (origin && origin !== new URL(request.url).origin)
-    return fail(
-      'Bu istek yalnızca uygulamanın kendi sayfasından gönderilebilir.',
-      403,
-    );
+    return fail('Requests must originate from this site.', 403);
   const key = request.headers.get('x-typesafe-key')?.trim();
   if (!key || key.length < 8 || key.length > 1024 || /[\r\n]/.test(key))
-    return fail('Geçerli bir TypeSafe API anahtarı gir.', 401);
+    return fail('Enter a valid TypeSafe API key.', 401);
   let body;
   try {
     const raw = await request.text();
-    if (raw.length > 180000) return fail('İstek çok büyük.', 413);
+    if (raw.length > 180000) return fail('Request too large.', 413);
     body = JSON.parse(raw);
     validateRequest(body);
   } catch {
-    return fail('Geçersiz seçim isteği. Her soru 2–255 seçenek içermeli.');
+    return fail('Invalid choice request. Each question needs 2–255 options.');
   }
   try {
     const signal = AbortSignal.any([
@@ -49,12 +46,12 @@ export async function POST(request: Request) {
     );
     if (!response.ok) {
       const messages: Record<number, string> = {
-        401: 'API anahtarı kabul edilmedi. TypeSafe anahtarını kontrol et.',
-        402: 'TypeSafe bakiyesi yetersiz.',
-        403: 'Bu anahtarın Jev erişimi yok.',
-        422: 'TypeSafe isteği kabul etmedi. Daha küçük bir sözlük veya grup genişliği dene.',
-        429: 'TypeSafe istek sınırına ulaşıldı. Biraz bekleyip tekrar dene.',
-        529: 'TypeSafe şu anda yoğun. Biraz sonra tekrar dene.',
+        401: 'API key rejected. Check your TypeSafe key.',
+        402: 'Insufficient TypeSafe balance.',
+        403: 'This key does not have Jev access.',
+        422: 'TypeSafe rejected the request. Try fewer retained paths.',
+        429: 'TypeSafe rate limit reached. Wait and try again.',
+        529: 'TypeSafe is overloaded. Try again shortly.',
       };
       const retry = response.headers.get('retry-after');
       const seconds = retry === null ? NaN : Number(retry);
@@ -68,7 +65,7 @@ export async function POST(request: Request) {
         {
           error:
             messages[response.status] ||
-            `TypeSafe isteği başarısız (${response.status}).`,
+            `TypeSafe request failed (${response.status}).`,
           retryAfterMs,
         },
         { status: response.status, headers },
@@ -78,7 +75,7 @@ export async function POST(request: Request) {
     validateResponse(data, body.questions);
     if (!/^jev(?:[-.:]|$)/i.test(data.model))
       return fail(
-        'Beklenmeyen model yanıtı. Bu uygulama yalnızca Jev kullanır.',
+        'Unexpected model response. This application only uses Jev.',
         502,
       );
     return Response.json(data, { headers });
@@ -87,9 +84,9 @@ export async function POST(request: Request) {
       e instanceof Error &&
       (e.name === 'TimeoutError' || e.name === 'AbortError')
     )
-      return fail('İstek zaman aşımına uğradı veya durduruldu.', 504);
+      return fail('Request timed out or was cancelled.', 504);
     return fail(
-      'TypeSafe bağlantısı veya yanıtı doğrulanamadı. Tekrar deneyebilirsin.',
+      'Could not validate the TypeSafe connection or response. Try again.',
       502,
     );
   }

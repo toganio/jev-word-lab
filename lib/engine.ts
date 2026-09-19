@@ -1,3 +1,5 @@
+import { expandCandidates, reviewGrammar } from './grammar';
+import type { CategoryMap } from './categories';
 import { repetitionReason } from './repetition';
 import {
   STOP,
@@ -26,6 +28,8 @@ export type GenerationOptions = {
   beam: number;
   maxWords: number;
   repetitionGuard?: boolean;
+  grammarReview?: boolean;
+  prepared?: CategoryMap;
   signal: AbortSignal;
   evaluate: Evaluate;
   onPhase: (phase: string, trace?: Trace) => void;
@@ -50,6 +54,10 @@ export async function generate(
       return !reason;
     };
     const state = {
+      instructions: INSTRUCTIONS,
+      latest_user_request:
+        o.history.findLast((m) => m.role === 'user')?.content || '',
+      reply_is_new_assistant_sentence: true,
       conversation: o.history.slice(-10),
       reply_so_far: joinWords(words),
       already_written_words: words,
@@ -63,14 +71,14 @@ export async function generate(
     for (let depth = 0; frontier.length && depth < 16; depth++) {
       o.signal.throwIfAborted();
       o.onPhase(
-        `${index + 1}. seçim · ${depth === 0 ? 'kategoriler' : 'alt gruplar'} karşılaştırılıyor`,
+        `Selection ${index + 1} · comparing ${depth === 0 ? 'categories' : 'subgroups'}`,
       );
       const qs: Record<string, Question> = {};
       frontier.forEach(({ node }, i) => {
         if (node.children.length > 1)
           qs[`g${i}`] = {
             type: 'choice',
-            instructions: `${INSTRUCTIONS} Which option contains or is the best next word? Group: ${node.label}. An option describing a prefix contains only words starting with that prefix.`,
+            instructions: `Follow state.instructions. Which option contains or is the best next word of the NEW assistant reply? Group: ${node.label}. For alphabetical ranges, choose the range containing the spelling of the intended word, including inflected forms of its base.`,
             criteria: Object.fromEntries(
               node.children.map((c, j) => [
                 `o${j}`,
@@ -89,7 +97,7 @@ export async function generate(
             ? [['o0', 1] as [string, number]]
             : ranked(response!.answers[`g${i}`].probabilities);
         const trace: Trace = {
-          stage: depth === 0 ? 'Kategori' : 'Alt grup',
+          stage: depth === 0 ? 'Category' : 'Subgroup',
           path,
           options: node.children.length,
           candidates: choices.slice(0, 6).map(([key, p], n) => ({
@@ -99,7 +107,7 @@ export async function generate(
           })),
         };
         traces.push(trace);
-        o.onPhase(`${index + 1}. seçim · aday yollar daraltılıyor`, trace);
+        o.onPhase(`Selection ${index + 1} · narrowing candidate paths`, trace);
         let keptGroups = 0,
           keptWords = 0;
         for (const [key, p] of choices) {
@@ -124,17 +132,15 @@ export async function generate(
       // Probabilities from each group are conditional; multiply along each path before pruning.
       frontier = next.sort((a, b) => b.mass - a.mass).slice(0, o.beam);
     }
-    const candidateWords = [
-      ...new Set([
-        ...ranked(Object.fromEntries(finalists))
-          .slice(0, 120)
-          .map(([w]) => w),
-        ...o.common,
-      ]),
-    ];
+    const baseWords = ranked(Object.fromEntries(finalists))
+      .slice(0, 120)
+      .map(([w]) => w);
+    const candidateWords = o.grammarReview
+      ? expandCandidates(baseWords, o.common, o.prepared)
+      : [...new Set([...baseWords, ...o.common])];
     const validWords = candidateWords.filter(allowed);
     if (!validWords.length && !words.length)
-      throw new Error('Seçilen sözlükte aday kelime bulunamadı.');
+      throw new Error('No candidate words found in the selected dictionary.');
     const criteria: Record<string, string | null> = Object.fromEntries(
       validWords.map((w) => [w, `Append exactly the word "${w}".`]),
     );
@@ -146,32 +152,52 @@ export async function generate(
     }
     if (excluded.size) {
       const trace: Trace = {
-        stage: 'Tekrar koruması',
-        path: 'Uygulama filtresi · model seçimi değil',
+        stage: 'Repetition guard',
+        path: 'Application filter, not a model decision',
         options: excluded.size,
         candidates: [],
         excluded: [...excluded].map(([word, reason]) => ({ word, reason })),
       };
       traces.push(trace);
       o.onPhase(
-        `${index + 1}. seçim · ${excluded.size} tekrar adayı elendi`,
+        `Selection ${index + 1} · excluded ${excluded.size} repeated candidates`,
         trace,
       );
+    }
+    if (o.grammarReview && Object.keys(criteria).length) {
+      o.onPhase(`Selection ${index + 1} · Jev checks grammar and completeness`);
+      const review = await reviewGrammar(
+        state,
+        Object.keys(criteria),
+        o.evaluate,
+        o.signal,
+      );
+      traces.push(review.trace);
+      o.onPhase(
+        `Selection ${index + 1} · grammar checked by Jev`,
+        review.trace,
+      );
+      for (const word of Object.keys(criteria))
+        if (!review.allowed.has(word)) delete criteria[word];
+      if (Object.keys(criteria).length < 2)
+        throw new Error(
+          'Jev approved too few grammatical candidates. Partial reply retained; no substitute generated.',
+        );
     }
     if (Object.keys(criteria).length < 2)
       return {
         text: joinWords(words),
-        reason: 'Tekrarsız aday kalmadığı için durduruldu',
+        reason: 'Stopped: no non-repeating candidates remain',
       };
     if (Object.keys(criteria).length > 255)
-      throw new Error('Finalist sınırı aşıldı.');
-    o.onPhase(`${index + 1}. seçim · grupların finalistleri karşılaştırılıyor`);
+      throw new Error('Finalist limit exceeded.');
+    o.onPhase(`Selection ${index + 1} · comparing finalists`);
     const final = await o.evaluate(
       state,
       {
         next: {
           type: 'choice',
-          instructions: `${INSTRUCTIONS} Compare all finalists directly. Function words and punctuation are available. Select __END__ only when the answer is complete.`,
+          instructions: `Follow state.instructions. Compare all finalists as continuations of reply_so_far, not as answers in isolation. Prefer a word that adds useful information and follows the existing grammar. Function words and punctuation are available. Select __END__ only when the answer is complete.`,
           criteria,
         },
       },
@@ -180,17 +206,17 @@ export async function generate(
     const answer = final.answers.next;
     if (!Object.hasOwn(criteria, answer.choice))
       throw new Error(
-        'Jev izin verilen adayların dışında seçim yaptı; işlem durduruldu.',
+        'Jev chose outside the allowed candidates; generation stopped.',
       );
     const candidates: Candidate[] = ranked(answer.probabilities)
       .slice(0, 8)
       .map(([label, probability]) => ({
-        label: label === STOP ? '[Cevabı bitir]' : label,
+        label: label === STOP ? '[End reply]' : label,
         probability,
       }));
     traces.push({
-      stage: 'Final karşılaştırma',
-      path: 'Tüm finalistler',
+      stage: 'Final comparison',
+      path: 'All finalists',
       options: Object.keys(criteria).length,
       candidates,
     });
@@ -198,7 +224,7 @@ export async function generate(
       o.onStep(
         {
           index,
-          word: '[Cevabı bitir]',
+          word: '[End reply]',
           confidence: answer.confidence,
           traces,
           candidates,
@@ -206,7 +232,7 @@ export async function generate(
         },
         joinWords(words),
       );
-      return { text: joinWords(words), reason: 'Jev cevabı tamamladı' };
+      return { text: joinWords(words), reason: 'Jev ended the reply' };
     }
     words.push(answer.choice);
     o.onStep(
@@ -227,10 +253,10 @@ export async function generate(
     )
       return {
         text: joinWords(words),
-        reason: 'Tekrar döngüsü nedeniyle durduruldu',
+        reason: 'Stopped because of a repetition loop',
       };
   }
-  return { text: joinWords(words), reason: 'Seçim sınırına ulaşıldı' };
+  return { text: joinWords(words), reason: 'Selection limit reached' };
 }
 export async function classifyWords(
   words: string[],

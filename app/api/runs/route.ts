@@ -5,7 +5,7 @@ export async function POST(request: Request) {
   const origin = request.headers.get('origin');
   if (origin && origin !== new URL(request.url).origin)
     return Response.json(
-      { error: 'İstek kaynağı geçersiz.' },
+      { error: 'Invalid request origin.' },
       { status: 403, headers },
     );
   let record;
@@ -13,13 +13,13 @@ export async function POST(request: Request) {
     const raw = await request.text();
     if (raw.length > 1800000)
       return Response.json(
-        { error: 'Kayıt çok büyük.' },
+        { error: 'Record too large.' },
         { status: 413, headers },
       );
     record = sanitizeRecord(JSON.parse(raw));
   } catch {
     return Response.json(
-      { error: 'Deneme kaydı geçersiz.' },
+      { error: 'Invalid experiment record.' },
       { status: 400, headers },
     );
   }
@@ -53,8 +53,7 @@ export async function POST(request: Request) {
   } catch {
     return Response.json(
       {
-        error:
-          'Deneme kaydedilemedi. JSON çıktısını indirerek saklayabilirsin.',
+        error: 'Could not save the experiment. Download its JSON to keep it.',
       },
       { status: 503, headers },
     );
@@ -69,7 +68,7 @@ export async function GET(request: Request) {
     if (id) {
       if (!/^[a-f0-9-]{36}$/i.test(id))
         return Response.json(
-          { error: 'Geçersiz kayıt.' },
+          { error: 'Invalid record.' },
           { status: 400, headers },
         );
       const row = await db
@@ -80,7 +79,7 @@ export async function GET(request: Request) {
         .first<{ snapshot_json: string; updated_at: number }>();
       if (!row)
         return Response.json(
-          { error: 'Kayıt bulunamadı.' },
+          { error: 'Record not found.' },
           { status: 404, headers },
         );
       return Response.json(
@@ -91,7 +90,7 @@ export async function GET(request: Request) {
     const after = Number(url.searchParams.get('after') || 0);
     if (!Number.isSafeInteger(after) || after < 0)
       return Response.json(
-        { error: 'Geçersiz zaman.' },
+        { error: 'Invalid timestamp.' },
         { status: 400, headers },
       );
     const data = await db
@@ -103,7 +102,7 @@ export async function GET(request: Request) {
     return Response.json({ runs: data.results }, { headers });
   } catch {
     return Response.json(
-      { error: 'Kayıtlar okunamadı.' },
+      { error: 'Could not read records.' },
       { status: 503, headers },
     );
   }

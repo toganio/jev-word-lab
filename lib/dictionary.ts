@@ -73,6 +73,30 @@ export function categoryLabel(id: string) {
 function wordNode(word: string): WordNode {
   return { kind: 'word', word, label: word, count: 1 };
 }
+/** Flatten redundant prefix levels while retaining every word and at most 200 options. */
+export function compactChildren(input: Node[]): Node[] {
+  let children = [...input];
+  while (true) {
+    const expandable = children
+      .map((node, index) => ({ node, index }))
+      .filter(
+        ({ node }) =>
+          node.kind === 'group' &&
+          children.length - 1 + node.children.length <= LEAF_SIZE,
+      )
+      .sort(
+        (a, b) =>
+          (a.node as GroupNode).children.length -
+          (b.node as GroupNode).children.length,
+      )[0];
+    if (!expandable) return children;
+    children.splice(
+      expandable.index,
+      1,
+      ...(expandable.node as GroupNode).children,
+    );
+  }
+}
 function branch(
   words: string[],
   label: string,
@@ -90,25 +114,25 @@ function branch(
   let children: Node[];
   if (words.length <= LEAF_SIZE) children = words.map(leaf);
   else {
-    const buckets = new Map<string, string[]>();
-    for (const w of words) {
-      const key = w.slice(0, prefix.length + 1);
-      const b = buckets.get(key) || [];
-      b.push(w);
-      buckets.set(key, b);
+    // Balanced alphabetical ranges avoid long single-letter chains. Every word
+    // remains reachable, with at most 200 ranges and 200 words per leaf.
+    const sorted = [...words].sort();
+    const width = Math.max(LEAF_SIZE, Math.ceil(sorted.length / LEAF_SIZE));
+    children = [];
+    for (let i = 0; i < sorted.length; i += width) {
+      const batch = sorted.slice(i, i + width);
+      const range = `${batch[0]} … ${batch.at(-1)}`;
+      children.push(
+        branch(batch, `${label.split(' / ')[0]} / ${range}`, range, cache),
+      );
     }
-    children = [...buckets].map(([p, ws]) =>
-      ws.length === 1
-        ? leaf(ws[0])
-        : branch(ws, `${label.split(' / ')[0]} / ${p}…`, p, cache),
-    );
   }
   return {
     kind: 'group',
     label,
     count: words.length,
-    children,
-    description: `${label}. ${prefix ? `Words beginning with ${JSON.stringify(prefix)}. ` : ''}Examples: ${words.slice(0, 18).join(', ')}. ${words.length} words.`,
+    children: compactChildren(children),
+    description: `${label}. Examples: ${words.slice(0, 3).join(', ')}. ${words.length} words.`,
   };
 }
 export function buildTree(
@@ -160,7 +184,7 @@ export function buildPreparedTree(
     rows.length !== (limit ? Math.min(limit, dict.count) : dict.count)
   )
     throw new Error(
-      'Kelime tahmininden önce sözlüğün tamamını Jev ile kategorize et.',
+      'Categorize the entire dictionary with Jev before prediction.',
     );
   const cache = new Map<string, WordNode>();
   const children = AXES.map((axis, axisIndex) => {
