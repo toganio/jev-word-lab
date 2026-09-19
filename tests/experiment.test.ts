@@ -961,3 +961,69 @@ test('compact question payload reduces repeated criteria for the same complete d
     `Compact 32-word sample: ${calls} requests, ${bytes} serialized bytes; legacy criteria alone ${legacyCriteriaBytes} bytes`,
   );
 });
+
+test('dimension cohorts merge concurrent axes without lost cells and preserve all existing decisions', async () => {
+  const words = dictionary.words.slice(0, 96).map(([w]) => w);
+  const existing: CategoryMap = {
+    [words[0]]: [3, ...AXES.slice(1).map(() => 0)],
+  };
+  const stored: CategoryMap = {};
+  const seen = new Set<string>();
+  let calls = 0,
+    writes = 0,
+    bytes = 0,
+    active = 0,
+    peak = 0;
+  const persistence = new CategoryCheckpoints(async (batch) => {
+    writes++;
+    await new Promise((r) => setTimeout(r, 2));
+    for (const [word, assignment] of Object.entries(batch)) {
+      assert.ok(
+        assignment.filter(Boolean).length >=
+          (stored[word]?.filter(Boolean).length || 0),
+      );
+      stored[word] = assignment;
+    }
+  });
+  await prepareCategories(
+    words,
+    existing,
+    async (state, qs, signal) => {
+      active++;
+      peak = Math.max(peak, active);
+      calls++;
+      validateRequest({ state, questions: qs });
+      const size = Buffer.byteLength(JSON.stringify({ state, questions: qs }));
+      bytes += size;
+      assert.ok(size <= CATEGORY_REQUEST_BYTES);
+      const dimension = (state as { dimension: string }).dimension;
+      assert.ok(AXES.includes(dimension as any));
+      for (const q of Object.values(qs)) {
+        assert.equal(Object.keys(q.criteria).length, 9);
+        const word = JSON.parse(
+          q.instructions.match(/tags apply to ("[^"]+")/)![1],
+        );
+        assert.ok(words.includes(word));
+        const signature = `${word}:${dimension}:${Object.keys(q.criteria)[0]}`;
+        assert.ok(!seen.has(signature));
+        seen.add(signature);
+        assert.ok(!(word === words[0] && dimension === AXES[0]));
+      }
+      await abortableDelay(calls % 3, signal);
+      active--;
+      return answer(qs, (_id, q) => ({ [Object.keys(q.criteria)[0]]: 1 }));
+    },
+    new AbortController().signal,
+    (batch) => persistence.save(batch),
+    { concurrency: 8, pacer: unpaced },
+  );
+  assert.equal(seen.size, (words.length * 36 - 1) * 2);
+  assert.equal(peak, 8);
+  assert.ok(words.every((w) => isComplete(stored[w])));
+  assert.equal(stored[words[0]][0], 3);
+  assert.ok(words.slice(1).every((w) => stored[w].every((v) => v === 9)));
+  assert.ok(writes < calls);
+  console.log(
+    `Dimension cohort 96-word sample: ${calls} requests, ${writes} database writes, ${bytes} serialized bytes`,
+  );
+});

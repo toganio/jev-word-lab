@@ -1,8 +1,8 @@
 /** Account limits are dynamic; 95% of the documented TPS and 19 requests/second are local ceilings.
  * https://docs.typesafe.ai/models and https://docs.typesafe.ai/api#handling-rate-limits
  */
-export const DEFAULT_CONCURRENCY = 32;
-export const MAX_CONCURRENCY = 32;
+export const DEFAULT_CONCURRENCY = 64;
+export const MAX_CONCURRENCY = 96;
 export class ProviderError extends Error {
   constructor(
     message: string,

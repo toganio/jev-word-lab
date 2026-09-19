@@ -8,10 +8,11 @@ import type { Evaluate, Question } from './types';
 export const TAXONOMY_VERSION = 'jev-36-multilabel-1';
 export const NOT_APPLICABLE = 128;
 export const UNCERTAIN = 256;
-export const QUESTIONS_PER_REQUEST = 128;
+export const QUESTIONS_PER_REQUEST = 256;
 export const QUESTIONS_PER_CELL = 2;
-// Conservative serialized UTF-8 budget leaves room under Jev's 64k context.
-export const CATEGORY_REQUEST_BYTES = 56000;
+// Fixed English prompts: 90k UTF-8 bytes at a conservative 0.65 tokens/byte
+// estimate leave headroom under 64k. This is an estimate, not a tokenizer.
+export const CATEGORY_REQUEST_BYTES = 90000;
 export const AXIS_DEFINITIONS = [
   {
     id: 'meaning',
@@ -601,7 +602,7 @@ export type PreparationOptions = {
     targetTokensPerSecond: number;
   }) => void;
 };
-/** A worker owns complete words, so simultaneous checkpoints never overwrite a sibling's dimensions. */
+/** Large scans share one dimension per request and merge independent answers before durable checkpoints. */
 export async function prepareCategories(
   words: string[],
   existing: CategoryMap,
@@ -648,6 +649,132 @@ export async function prepareCategories(
         options.onBackoff?.(ms, attempt);
       },
     );
+  if (words.length >= 64) {
+    // A bounded cohort keeps enough independent dimensions ready without opening
+    // thousands of incomplete words. Every question identifies its own target.
+    for (let base = 0; base < words.length && !failed; base += 192) {
+      const cohort = words.slice(base, base + 192);
+      if (cohort.length < 32) {
+        await prepareSequential(
+          cohort,
+          existing,
+          parallelEvaluate,
+          signal,
+          persist,
+        );
+        continue;
+      }
+      const jobs: {
+        axis: number;
+        words: string[];
+        state: unknown;
+        questions: Record<string, Question>;
+      }[] = [];
+      for (let axis = 0; axis < AXES.length; axis++) {
+        const definition = AXIS_DEFINITIONS[axis];
+        const state = {
+          task: scanState.task,
+          dimension: definition.id,
+          guidance: definition.guidance,
+        };
+        const stateBytes =
+          new TextEncoder().encode(JSON.stringify(state)).length + 100;
+        let batch: string[] = [],
+          questions: Record<string, Question> = {},
+          bytes = stateBytes;
+        const emit = () => {
+          if (batch.length) jobs.push({ axis, words: batch, state, questions });
+          batch = [];
+          questions = {};
+          bytes = stateBytes;
+        };
+        for (const word of cohort) {
+          if (existing[word]?.[axis]) continue;
+          const pair = [0, 1].map(
+            (group): Question => ({
+              type: 'choice',
+              instructions: `Which tags apply to ${JSON.stringify(word)}?`,
+              criteria: Object.fromEntries(
+                Object.entries(choices[axis][group]).map(([id, label]) => [
+                  Number(id) === NOT_APPLICABLE
+                    ? 'none'
+                    : Number(id) === UNCERTAIN
+                      ? 'uncertain'
+                      : label.replaceAll(' + ', '+'),
+                  null,
+                ]),
+              ),
+            }),
+          );
+          const size =
+            new TextEncoder().encode(JSON.stringify(pair)).length + 24;
+          if (
+            batch.length &&
+            (bytes + size > CATEGORY_REQUEST_BYTES ||
+              batch.length >= 96 ||
+              batch.length * 2 + 2 > QUESTIONS_PER_REQUEST)
+          )
+            emit();
+          questions[`w${batch.length * 2}`] = pair[0];
+          questions[`w${batch.length * 2 + 1}`] = pair[1];
+          batch.push(word);
+          bytes += size;
+        }
+        emit();
+      }
+      let nextJob = 0;
+      async function dimensionWorker() {
+        try {
+          while (!failed && nextJob < jobs.length) {
+            signal.throwIfAborted();
+            const job = jobs[nextJob++];
+            const response = await parallelEvaluate(
+              job.state,
+              job.questions,
+              signal,
+            );
+            const updates: CategoryMap = {};
+            job.words.forEach((word, i) => {
+              const selected = [0, 1].map((group) => {
+                const label = response.answers[`w${i * 2 + group}`].choice;
+                if (label === 'none') return NOT_APPLICABLE;
+                if (label === 'uncertain') return UNCERTAIN;
+                const entry = Object.entries(choices[job.axis][group]).find(
+                  ([, text]) => text.replaceAll(' + ', '+') === label,
+                );
+                if (!entry)
+                  throw new Error('Jev returned an invalid category label');
+                return Number(entry[0]);
+              });
+              const assignment = [
+                ...(existing[word] || Array(AXES.length).fill(0)),
+              ];
+              assignment[job.axis] = combineTagGroups(selected[0], selected[1]);
+              updates[word] = assignment;
+            });
+            // Synchronous immutable merge: later responses include all earlier
+            // dimensions, even while their database writes are still in flight.
+            Object.assign(existing, updates);
+            await persist(updates);
+          }
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        }
+      }
+      await Promise.all(
+        Array.from(
+          { length: Math.min(parallel, jobs.length) },
+          dimensionWorker,
+        ),
+      );
+    }
+    if (failed) throw failure;
+    signal.throwIfAborted();
+    return;
+  }
   async function worker() {
     try {
       while (!failed && cursor < words.length) {

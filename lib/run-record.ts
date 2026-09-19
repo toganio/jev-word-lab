@@ -1,5 +1,5 @@
 import type { Message, Stats, Step } from './types';
-export const APP_VERSION = 'jev-lab-5-compact';
+export const APP_VERSION = 'jev-lab-6-measured';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'error';
 export type RecordedOperation = {
   id: number;
@@ -91,7 +91,7 @@ export function sanitizeRecord(input: any): RunRecord {
       ),
       repetitionGuard: settings.repetitionGuard,
       ...(typeof settings.parallelism === 'number'
-        ? { parallelism: num(settings.parallelism, 32) }
+        ? { parallelism: num(settings.parallelism, 96) }
         : {}),
     },
     conversation: arr(input.conversation, 10, (m) => {
@@ -126,8 +126,8 @@ export function sanitizeRecord(input: any): RunRecord {
       status: str(o.status, 20),
       at: num(o.at),
       ms: num(o.ms),
-      questions: num(o.questions, 128),
-      options: num(o.options, 32640),
+      questions: num(o.questions, 256),
+      options: num(o.options, 65280),
       summary: str(o.summary, 24000),
     })),
     usage: {

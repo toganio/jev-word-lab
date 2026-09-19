@@ -572,7 +572,7 @@ export default function Home() {
                     .split('Examples:')[0]
                     .slice(0, 100)
                 : preparationActive.current
-                  ? `${questions[qid].instructions.split('. ').slice(0, 2).join(' · ')}: ${questions[qid].criteria[a.choice] || a.choice}`
+                  ? `${(state as { dimension?: string }).dimension || ''} ${questions[qid].instructions.split('. ')[0]}: ${questions[qid].criteria[a.choice] || a.choice}`
                   : a.choice,
           )
           .join(' / ') +
@@ -802,6 +802,10 @@ export default function Home() {
         c.signal,
         async (result) => {
           done += Object.values(result).filter(isComplete).length;
+          updateStats({
+            words: done,
+            elapsedMs: Date.now() - statsRef.current.startedAt,
+          });
           pendingCategories.current = {
             ...pendingCategories.current,
             ...result,
@@ -812,7 +816,9 @@ export default function Home() {
           setOverrides((old) => ({ ...old, ...result }));
           await checkpoints.save(result);
           const unsaved = { ...pendingCategories.current };
-          for (const word of Object.keys(result)) delete unsaved[word];
+          for (const word of Object.keys(result)) {
+            if (unsaved[word] === result[word]) delete unsaved[word];
+          }
           pendingCategories.current = Object.keys(unsaved).length
             ? unsaved
             : null;
@@ -1030,7 +1036,9 @@ export default function Home() {
               options={[
                 ['8', 'En fazla 8'],
                 ['16', 'En fazla 16'],
-                ['32', 'En fazla 32 · otomatik hız'],
+                ['32', 'En fazla 32'],
+                ['64', 'En fazla 64 · ölçülen hızlı ayar'],
+                ['96', 'En fazla 96'],
               ]}
             />
             <Button
@@ -1080,6 +1088,12 @@ export default function Home() {
             Gerçek API kullanımı ve yoğunluk yanıtlarına göre otomatik
             ayarlanır.
           </p>
+          {classifying && stats.elapsedMs > 0 && (
+            <p>
+              {(stats.words / (stats.elapsedMs / 1000)).toFixed(1)} tamamlanan
+              kelime/sn · bu çalışmanın ortalaması
+            </p>
+          )}
           <p>
             {activeRequests} / {parallelism} etkin Jev isteği · istek başına en
             fazla {QUESTIONS_PER_REQUEST} küçük soru paralel değerlendirilir.

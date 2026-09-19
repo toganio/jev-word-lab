@@ -26,7 +26,10 @@ export class CategoryCheckpoints {
       const merged: CategoryMap = {};
       while (this.queue.length) {
         const next = this.queue[0];
-        if (Object.keys(merged).length + Object.keys(next.result).length > 100)
+        if (
+          new Set([...Object.keys(merged), ...Object.keys(next.result)]).size >
+          100
+        )
           break;
         batch.push(this.queue.shift()!);
         Object.assign(merged, next.result);
