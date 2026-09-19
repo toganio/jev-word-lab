@@ -1565,3 +1565,105 @@ test('old category files remain compatible after translating presentation labels
   file.definitions[0].tags[0] = 'different-meaning';
   assert.throws(() => validateCategoryFile(file, 'hash', words));
 });
+
+import { loadInitialCategories } from '../lib/category-bootstrap';
+import { TAXONOMY_VERSION } from '../lib/categories';
+import categoryMetadata from '../data/category-map-metadata.json';
+test('fresh installations automatically load the complete shipped Jev map without model calls or writes', async () => {
+  const calls: string[] = [];
+  const raw = fs.readFileSync('data/jev-category-map-36-complete.json', 'utf8');
+  const result = await loadInitialCategories(
+    dictionary.words.map(([w]) => w),
+    async (url, init) => {
+      calls.push(String(url));
+      assert.equal(init?.method, undefined);
+      if (String(url) === '/api/categories')
+        return Response.json({ sessionId: null });
+      assert.ok(
+        String(url).startsWith('/data/jev-category-map-36-complete.json?v='),
+      );
+      return new Response(raw);
+    },
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(result.bundled, true);
+  assert.equal(result.page.complete, true);
+  assert.equal(result.page.verifiedCount, 87776);
+  assert.equal(result.page.scannedCells, 87776 * 36);
+  assert.equal(Object.keys(result.page.categories).length, dictionary.count);
+});
+test('partial saved sessions are preserved and never blended with bundled classifications', async () => {
+  const calls: string[] = [];
+  const base = {
+    version: TAXONOMY_VERSION,
+    sourceSha256: categoryMetadata.dictionarySha256,
+    sessionId: 'saved',
+    complete: false,
+  };
+  const result = await loadInitialCategories(['water', 'tea'], async (url) => {
+    calls.push(String(url));
+    return Response.json(
+      calls.length === 1
+        ? {
+            ...base,
+            categories: { water: AXES.map(() => 1) },
+            nextCursor: 'water',
+          }
+        : { ...base, categories: { tea: AXES.map(() => 0) }, nextCursor: null },
+    );
+  });
+  assert.equal(result.bundled, false);
+  assert.equal(result.page.complete, false);
+  assert.deepEqual(Object.keys(result.page.categories), ['water', 'tea']);
+  assert.ok(calls.every((url) => url.startsWith('/api/categories')));
+});
+test('unavailable storage permits the default map, but incomplete default files fail closed', async () => {
+  const good = makeCategoryFile(
+    { water: AXES.map(() => 1) },
+    categoryMetadata.dictionarySha256,
+    ['water'],
+  );
+  const request =
+    (file: unknown): typeof fetch =>
+    async (url) => {
+      if (String(url) === '/api/categories') throw new Error('No database');
+      return Response.json(file);
+    };
+  const loaded = await loadInitialCategories(['water'], request(good));
+  assert.equal(loaded.storageUnavailable, true);
+  assert.equal(loaded.page.complete, true);
+  const partial = makeCategoryFile(
+    { water: AXES.map(() => 0) },
+    categoryMetadata.dictionarySha256,
+    ['water'],
+  );
+  await assert.rejects(
+    loadInitialCategories(['water'], request(partial)),
+    /must cover every word/,
+  );
+  await assert.rejects(
+    loadInitialCategories(
+      ['water'],
+      request({ ...good, sourceSha256: 'wrong' }),
+    ),
+    /does not match/,
+  );
+});
+test('a failed later saved page cannot silently replace a known session with the bundled map', async () => {
+  let calls = 0;
+  await assert.rejects(
+    loadInitialCategories(['water'], async (url) => {
+      assert.ok(String(url).startsWith('/api/categories'));
+      calls++;
+      if (calls > 1) return new Response('', { status: 503 });
+      return Response.json({
+        version: TAXONOMY_VERSION,
+        sourceSha256: categoryMetadata.dictionarySha256,
+        sessionId: 'saved',
+        categories: {},
+        nextCursor: 'water',
+      });
+    }),
+    /Could not load the saved/,
+  );
+});

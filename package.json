@@ -13,7 +13,10 @@
     "format": "oxfmt",
     "test": "node scripts/test.mjs",
     "typecheck": "tsc --noEmit",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "predev": "node scripts/prepare-category-asset.mjs && node scripts/prepare-local-database.mjs",
+    "prebuild": "node scripts/prepare-category-asset.mjs",
+    "prestart": "node scripts/prepare-local-database.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",

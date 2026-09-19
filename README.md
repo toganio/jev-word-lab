@@ -4,9 +4,24 @@ An English dictionary-constrained conversation experiment using TypeSafe AI's `j
 
 ## Start
 
-Node 22.13+ is required. Run `npm install`, then `npm run dev`. Enter your TypeSafe API key in the password field and click **Connect**. A single real choice request verifies access. Keys live only in the browser component's memory and are forwarded over the same-origin backend to TypeSafe. They are not saved, logged, or included in exports. Do not put a shared key in client code.
+Node 22.13+ and npm are required. Download and extract the GitHub ZIP, or clone the repository:
 
-First use **Create category file** to scan the entire dictionary across 36 dimensions, or upload a compatible category file. Word prediction stays locked until full coverage is verified. Then choose retained paths, output limit and prediction request budget and start word prediction. Every displayed decision is a real API response. Missing/invalid keys never generate mock answers.
+```sh
+git clone https://github.com/toganio/jev-word-lab.git
+cd jev-word-lab
+npm ci
+npm run dev
+```
+
+Open the local URL printed in the terminal (normally http://localhost:3000). No Codex, ChatGPT or Cloudflare account, `.env` file, shared key, or cloud database is required for local use. The start script prepares local database tables without deleting existing records and makes the bundled category file available. Internet access is needed for dependency installation and TypeSafe requests. A valid TypeSafe key with access to `jev-latest` and sufficient API balance is required for prediction.
+
+Enter your TypeSafe API key in the password field and click **Connect**. A single real choice request verifies access. Keys live only in the browser component's memory and are forwarded over the same-origin backend to TypeSafe. They are not saved, logged, or included in exports. Do not put a shared key in client code.
+
+On a fresh installation, the complete bundled Jev classification loads automatically: 87,776 words across 36 dimensions. No upload, reclassification, API key or paid model call is needed to load it. The app verifies dictionary identity, schema and full coverage before unlocking prediction. Existing saved sessions take priority, including partial imports that can be resumed. If session storage is unavailable, the bundled map still loads and the interface reports the storage limitation. Then choose retained paths, output limit and prediction request budget and start word prediction. Every displayed decision is a real API response. Missing/invalid keys never generate mock answers.
+
+For a local production build, run `npm run build`, then `npm start`. Local database state stays in the ignored `.wrangler` directory. The repository contains source, UI components, dictionary, full classification snapshot, schema/migrations, setup scripts and the dependency lockfile. Dependencies and build output are generated during installation/build. `wrangler.local.json` contains only a dummy local database identifier. The existing `.openai/hosting.json` project ID identifies this hosted Site; local setup does not publish to it. Use your own hosting resources and authentication if deploying a separate public server.
+
+GitHub CI runs tests, TypeScript checks, a production build, verifies the bundled file byte-for-byte, and starts a clean local instance to check its page, category asset, and database endpoints without an API key.
 
 ## Dictionary and grouping
 
@@ -120,7 +135,7 @@ Automatic Codex review is paused. Saving an experiment to the private site's dat
 - [Complete category file](data/jev-category-map-36-complete.json) — 87,776 words, 36 dimensions, 3,159,936 scanned cells (about 10.8 MB).
 - [Integrity and provenance metadata](data/category-map-metadata.json) — SHA-256 checksum and dictionary fingerprint.
 
-Download the raw JSON and select **Upload category file** in the app. Import makes no paid model calls. This is the user's authorized export of Jev's actual saved classifications; it includes explicit uncertainty and not-applicable labels. Complete coverage does not mean every label is correct. The snapshot excludes API keys, private session identifiers, and conversation logs. WordNet-derived vocabulary is covered by the included [WordNet license](public/data/WORDNET-LICENSE.txt).
+The complete snapshot is loaded by default when no saved session exists. `npm run dev` and `npm run build` verify its checksum and copy it into the public assets automatically; the production build includes the file. It is fetched separately rather than embedded in the JavaScript bundle. No database import is required. To use a different compatible file, select **Upload category file** in the app. Import makes no paid model calls. This is the user's authorized export of Jev's actual saved classifications; it includes explicit uncertainty and not-applicable labels. Complete coverage does not mean every label is correct. The snapshot excludes API keys, private session identifiers, and conversation logs. WordNet-derived vocabulary is covered by the included [WordNet license](public/data/WORDNET-LICENSE.txt).
 
 To regenerate an export from a locally available map, run `node scripts/export-category-file.mjs /path/to/category-map.json`. The helper validates full coverage and writes the checksum. To regenerate spelling exceptions, run `python3 scripts/build-inflections.py /path/to/wordnet.zip`.
 
