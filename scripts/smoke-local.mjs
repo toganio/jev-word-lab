@@ -7,7 +7,7 @@ const server = spawn(
   [
     'node_modules/vinext/dist/cli.js',
     'dev',
-    '--host',
+    '--hostname',
     '127.0.0.1',
     '--port',
     '4173',

@@ -46,7 +46,6 @@ import {
   isComplete,
   selectedLabels,
   prepareCategories,
-  sanitizeCategories,
   type CategoryMap,
 } from '@/lib/categories';
 import {
