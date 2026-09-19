@@ -41,6 +41,7 @@ try {
   fs.writeFileSync('data/' + name, raw);
   const report = {
     file: name,
+    sizeBytes: Buffer.byteLength(raw),
     sha256: createHash('sha256').update(raw).digest('hex'),
     dictionarySha256: manifest.sourceSha256,
     words: manifest.words.length,

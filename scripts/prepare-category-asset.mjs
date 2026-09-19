@@ -11,6 +11,8 @@ const metadata = JSON.parse(
   ),
 );
 const bytes = await readFile(source);
+if (bytes.byteLength !== metadata.sizeBytes)
+  throw new Error('Bundled category file size mismatch.');
 if (createHash('sha256').update(bytes).digest('hex') !== metadata.sha256)
   throw new Error('Bundled category file checksum mismatch.');
 const target = new URL(

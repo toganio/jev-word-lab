@@ -44,6 +44,7 @@ async function summary(db: D1Database, s: Session | null) {
     origin: s?.origin || null,
     expectedCount: EXPECTED_WORDS.length,
     expectedCells: EXPECTED_WORDS.length * AXES.length,
+    storedCount: row?.stored || 0,
     verifiedCount,
     scannedCells,
     missingCount: EXPECTED_WORDS.length - verifiedCount,

@@ -14,6 +14,7 @@ export type CategoryPage = {
   sourceSha256: string;
   sessionId: string | null;
   expectedCount: number;
+  storedCount?: number;
   expectedCells: number;
   verifiedCount: number;
   scannedCells: number;
@@ -25,11 +26,67 @@ export type CategoryBootstrap = {
   bundled: boolean;
   storageUnavailable: boolean;
 };
+export type CategoryLoadProgress = {
+  stage:
+    | 'dictionary'
+    | 'checking'
+    | 'downloading'
+    | 'saved'
+    | 'verifying'
+    | 'ready';
+  loaded?: number;
+  total?: number;
+  unit?: 'bytes' | 'words';
+};
+type ReportProgress = (progress: CategoryLoadProgress) => void;
+async function readBundledFile(response: Response, report: ReportProgress) {
+  report({
+    stage: 'downloading',
+    loaded: 0,
+    total: metadata.sizeBytes,
+    unit: 'bytes',
+  });
+  // Stream decoded bytes. Content-Length may describe compressed transfer bytes,
+  // so use the checked-in file's byte length for the displayed denominator.
+  const reader = response.body?.getReader();
+  let text = '';
+  if (reader) {
+    const decoder = new TextDecoder();
+    let loaded = 0,
+      lastReport = 0;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        loaded += value.byteLength;
+        if (Date.now() - lastReport >= 100 || loaded >= metadata.sizeBytes) {
+          report({
+            stage: 'downloading',
+            loaded,
+            total: metadata.sizeBytes,
+            unit: 'bytes',
+          });
+          lastReport = Date.now();
+        }
+      }
+      text += decoder.decode();
+    } finally {
+      reader.releaseLock();
+    }
+  } else text = await response.text();
+  report({ stage: 'verifying' });
+  // Give the UI a rendering opportunity before parsing and full-map validation.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  return JSON.parse(text);
+}
 // No model calls or database writes: the shipped Jev snapshot is already complete.
 export async function loadInitialCategories(
   words: string[],
   request: typeof fetch = fetch,
+  report: ReportProgress = () => {},
 ): Promise<CategoryBootstrap> {
+  report({ stage: 'checking' });
   let page: CategoryPage | undefined;
   let storageUnavailable = false;
   try {
@@ -42,6 +99,12 @@ export async function loadInitialCategories(
     storageUnavailable = true;
   }
   if (!page?.sessionId) {
+    report({
+      stage: 'downloading',
+      loaded: 0,
+      total: metadata.sizeBytes,
+      unit: 'bytes',
+    });
     const response = await request(
       `/data/jev-category-map-36-complete.json?v=${metadata.sha256}`,
       {
@@ -52,7 +115,7 @@ export async function loadInitialCategories(
       throw new Error(
         'Could not load the bundled category file. Reload to try again.',
       );
-    const file = await response.json();
+    const file = await readBundledFile(response, report);
     const categories = validateCategoryFile(
       file,
       metadata.dictionarySha256,
@@ -62,6 +125,12 @@ export async function loadInitialCategories(
       throw new Error(
         'The bundled category file must cover every word and dimension.',
       );
+    report({
+      stage: 'ready',
+      loaded: words.length,
+      total: words.length,
+      unit: 'words',
+    });
     return {
       bundled: true,
       storageUnavailable,
@@ -72,6 +141,7 @@ export async function loadInitialCategories(
         sourceSha256: metadata.dictionarySha256,
         sessionId: null,
         expectedCount: words.length,
+        storedCount: words.length,
         expectedCells: words.length * AXES.length,
         verifiedCount: words.length,
         scannedCells: scannedCells(categories),
@@ -84,6 +154,7 @@ export async function loadInitialCategories(
   // with the default or replace it when a later page fails to load.
   const sessionId = page.sessionId;
   const categories: CategoryMap = {};
+  let loaded = 0;
   while (true) {
     if (
       page.version !== TAXONOMY_VERSION ||
@@ -91,7 +162,10 @@ export async function loadInitialCategories(
       page.sessionId !== sessionId
     )
       throw new Error('Saved category session does not match this dictionary.');
-    Object.assign(categories, sanitizeCategories(page.categories));
+    const batch = sanitizeCategories(page.categories);
+    Object.assign(categories, batch);
+    loaded += Object.keys(batch).length;
+    report({ stage: 'saved', loaded, total: page.storedCount, unit: 'words' });
     if (!page.nextCursor) break;
     const params = new URLSearchParams({
       session: sessionId,
@@ -106,6 +180,7 @@ export async function loadInitialCategories(
       );
     page = (await response.json()) as CategoryPage;
   }
+  report({ stage: 'ready', loaded, total: loaded, unit: 'words' });
   return {
     page: { ...page, categories },
     bundled: false,
