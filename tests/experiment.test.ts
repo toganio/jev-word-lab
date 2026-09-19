@@ -1528,11 +1528,15 @@ test('old category files remain compatible after translating presentation labels
   assert.throws(() => validateCategoryFile(file, 'hash', words));
 });
 
-import { loadInitialCategories } from '../lib/category-bootstrap';
+import {
+  loadInitialCategories,
+  type CategoryLoadProgress,
+} from '../lib/category-bootstrap';
 import { TAXONOMY_VERSION } from '../lib/categories';
 import categoryMetadata from '../data/category-map-metadata.json';
 test('fresh installations automatically load the complete shipped Jev map without model calls or writes', async () => {
   const calls: string[] = [];
+  const progress: CategoryLoadProgress[] = [];
   const raw = fs.readFileSync('data/jev-category-map-36-complete.json', 'utf8');
   const result = await loadInitialCategories(
     dictionary.words.map(([w]) => w),
@@ -1544,10 +1548,31 @@ test('fresh installations automatically load the complete shipped Jev map withou
       assert.ok(
         String(url).startsWith('/data/jev-category-map-36-complete.json?v='),
       );
-      return new Response(raw);
+      const bytes = new TextEncoder().encode(raw);
+      let chunk = 0;
+      return new Response(
+        new ReadableStream({
+          pull(controller) {
+            if (chunk === 0) controller.enqueue(bytes.slice(0, 128));
+            else if (chunk === 1) controller.enqueue(bytes.slice(128));
+            else controller.close();
+            chunk++;
+          },
+        }),
+        { headers: { 'content-encoding': 'gzip', 'content-length': '100' } },
+      );
     },
+    (event) => progress.push(event),
   );
   assert.equal(calls.length, 2);
+  const downloads = progress.filter((event) => event.stage === 'downloading');
+  assert.ok(downloads.some((event) => event.loaded === 128));
+  assert.equal(downloads.at(-1)?.loaded, Buffer.byteLength(raw));
+  assert.ok(downloads.every((event) => event.total === Buffer.byteLength(raw)));
+  assert.deepEqual(
+    progress.slice(-2).map((event) => event.stage),
+    ['verifying', 'ready'],
+  );
   assert.equal(result.bundled, true);
   assert.equal(result.page.complete, true);
   assert.equal(result.page.verifiedCount, 87776);
@@ -1556,24 +1581,44 @@ test('fresh installations automatically load the complete shipped Jev map withou
 });
 test('partial saved sessions are preserved and never blended with bundled classifications', async () => {
   const calls: string[] = [];
+  const progress: CategoryLoadProgress[] = [];
   const base = {
     version: TAXONOMY_VERSION,
     sourceSha256: categoryMetadata.dictionarySha256,
     sessionId: 'saved',
+    storedCount: 2,
+    expectedCount: 87776,
     complete: false,
   };
-  const result = await loadInitialCategories(['water', 'tea'], async (url) => {
-    calls.push(String(url));
-    return Response.json(
-      calls.length === 1
-        ? {
-            ...base,
-            categories: { water: AXES.map(() => 1) },
-            nextCursor: 'water',
-          }
-        : { ...base, categories: { tea: AXES.map(() => 0) }, nextCursor: null },
-    );
-  });
+  const result = await loadInitialCategories(
+    ['water', 'tea'],
+    async (url) => {
+      calls.push(String(url));
+      return Response.json(
+        calls.length === 1
+          ? {
+              ...base,
+              categories: { water: AXES.map(() => 1) },
+              nextCursor: 'water',
+            }
+          : {
+              ...base,
+              categories: { tea: AXES.map(() => 0) },
+              nextCursor: null,
+            },
+      );
+    },
+    (event) => progress.push(event),
+  );
+  assert.deepEqual(
+    progress
+      .filter((event) => event.stage === 'saved')
+      .map((event) => [event.loaded, event.total]),
+    [
+      [1, 2],
+      [2, 2],
+    ],
+  );
   assert.equal(result.bundled, false);
   assert.equal(result.page.complete, false);
   assert.deepEqual(Object.keys(result.page.categories), ['water', 'tea']);

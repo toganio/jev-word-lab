@@ -9,5 +9,6 @@
   "model": "jev-latest",
   "source": "User-authorized export of saved Jev classifications",
   "exportedAt": "2026-09-19T09:35:59.099Z",
-  "note": "Coverage is complete; classifications may be uncertain or incorrect. Contains no API keys, conversation logs or session identifiers."
+  "note": "Coverage is complete; classifications may be uncertain or incorrect. Contains no API keys, conversation logs or session identifiers.",
+  "sizeBytes": 10755714
 }

@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { Progress } from '@/components/ui/progress';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -62,6 +63,7 @@ import {
 import {
   loadInitialCategories,
   type CategoryPage,
+  type CategoryLoadProgress,
 } from '@/lib/category-bootstrap';
 import { CategoryCheckpoints } from '@/lib/checkpoints';
 import { fetchJson } from '@/lib/request';
@@ -170,6 +172,8 @@ export default function Home() {
     [query, setQuery] = useState('');
   const [categoriesLoading, setCategoriesLoading] = useState(true);
   const [categoryError, setCategoryError] = useState('');
+  const [categoryLoadProgress, setCategoryLoadProgress] =
+    useState<CategoryLoadProgress>({ stage: 'dictionary' });
   const [bundledCategories, setBundledCategories] = useState(false);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
   const pendingCategories = useRef<CategoryMap | null>(null);
@@ -225,14 +229,44 @@ export default function Home() {
     preparedCount === dict.count &&
     coverage?.complete === true &&
     !pendingCategories.current;
+  const categoryLoadPercent =
+    categoryLoadProgress.stage === 'ready'
+      ? 100
+      : categoryLoadProgress.total && categoryLoadProgress.loaded !== undefined
+        ? Math.min(
+            99,
+            Math.floor(
+              (categoryLoadProgress.loaded / categoryLoadProgress.total) * 100,
+            ),
+          )
+        : null;
+  const categoryLoadLabel = {
+    dictionary: 'Loading the English dictionary…',
+    checking: 'Checking for saved categories…',
+    downloading: 'Downloading category file…',
+    saved: 'Loading saved categories…',
+    verifying: 'Verifying every word and all 36 dimensions…',
+    ready: categoriesReady
+      ? 'Every word and all 36 dimensions are ready.'
+      : 'Saved categories loaded. Some words still need categorization.',
+  }[categoryLoadProgress.stage];
+  const categoryLoadDetail =
+    categoryLoadProgress.unit === 'bytes'
+      ? `${((categoryLoadProgress.loaded || 0) / 1000000).toFixed(1)} / ${((categoryLoadProgress.total || 0) / 1000000).toFixed(1)} MB`
+      : categoryLoadProgress.unit === 'words'
+        ? `${number(categoryLoadProgress.loaded || 0)}${categoryLoadProgress.total !== undefined ? ` / ${number(categoryLoadProgress.total)}` : ''} words loaded`
+        : '';
   async function loadCategories() {
     setCategoriesLoading(true);
+    setCategoryLoadProgress({ stage: 'dictionary' });
     setCategoryError('');
     try {
       const dictionary = await dictPromise.current;
       if (!dictionary) throw new Error('Dictionary is not ready.');
       const result = await loadInitialCategories(
         dictionary.words.map(([word]) => word),
+        fetch,
+        setCategoryLoadProgress,
       );
       sessionRef.current = result.page.sessionId;
       sourceHash.current = result.page.sourceSha256;
@@ -973,6 +1007,53 @@ export default function Home() {
             <Circle size={8} fill="currentColor" /> jev-latest
           </span>
         </div>
+        <section
+          className={`category-loading-status ${categoryError ? 'has-error' : ''}`}
+          aria-label="Category loading status"
+          aria-busy={categoriesLoading}
+        >
+          <div className="category-loading-heading">
+            {categoriesLoading ? (
+              <LoaderCircle className="spin" size={20} aria-hidden="true" />
+            ) : categoryError ? (
+              <X size={20} aria-hidden="true" />
+            ) : (
+              <Check size={20} aria-hidden="true" />
+            )}
+            <h2>
+              {categoriesLoading
+                ? 'Loading categories'
+                : categoryError
+                  ? 'Could not load categories'
+                  : categoriesReady
+                    ? 'Categories ready'
+                    : 'Saved categories loaded'}
+            </h2>
+            {!categoryError && categoryLoadPercent !== null && (
+              <span className="category-loading-percent">
+                {categoryLoadPercent}%
+              </span>
+            )}
+          </div>
+          <p role={categoryError ? 'alert' : 'status'}>
+            {categoryError || categoryLoadLabel}
+          </p>
+          {!categoryError && (
+            <Progress
+              className={`category-load-progress ${categoryLoadPercent === null ? 'is-indeterminate' : ''}`}
+              value={categoryLoadPercent}
+              aria-label="Loading category data"
+            />
+          )}
+          {categoryLoadDetail && !categoryError && (
+            <p className="category-loading-detail">{categoryLoadDetail}</p>
+          )}
+          {categoryError && (
+            <Button variant="outline" onClick={() => void loadCategories()}>
+              Retry loading
+            </Button>
+          )}
+        </section>
         <section className="connection">
           <div className="connection-title">
             <KeyRound size={20} />

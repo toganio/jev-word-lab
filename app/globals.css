@@ -1189,3 +1189,76 @@ footer a {
   margin-top: 1rem;
   font-size: 1rem;
 }
+
+.category-loading-status {
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  border: 1px solid #c5d4ce;
+  border-radius: 12px;
+  background: #f3f8f5;
+}
+.category-loading-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  color: #087f63;
+}
+.category-loading-heading h2 {
+  font-size: 1rem;
+  font-weight: 650;
+}
+.category-loading-heading > svg {
+  flex-shrink: 0;
+}
+.category-loading-percent {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+.category-loading-status p {
+  margin: 0.5rem 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+.category-loading-detail {
+  color: var(--muted-text);
+  font-variant-numeric: tabular-nums;
+}
+.category-load-progress {
+  margin-top: 0.75rem;
+}
+.category-load-progress [data-slot='progress-track'] {
+  height: 0.5rem;
+  background: #dbe8e1;
+}
+.category-load-progress [data-slot='progress-indicator'] {
+  background: #087f63;
+}
+.category-load-progress.is-indeterminate [data-slot='progress-indicator'] {
+  width: 35%;
+  animation: category-loading-slide 1.5s ease-in-out infinite;
+}
+.category-loading-status.has-error {
+  border-color: #e8bdc5;
+  background: #fff3f5;
+}
+.category-loading-status.has-error .category-loading-heading {
+  color: #973548;
+}
+@keyframes category-loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .category-load-progress.is-indeterminate [data-slot='progress-indicator'] {
+    animation: none;
+    transform: none;
+  }
+  .category-loading-heading .spin {
+    animation: none;
+  }
+}
