@@ -862,6 +862,85 @@ test('proxy passes through sanitized Retry-After hints without changing Jev prov
   }
 });
 
+test('upstream HTML 520 retries the same Jev request, honors Retry-After, and remains bounded', async () => {
+  const original = globalThis.fetch;
+  const payload = {
+    state: 'Classify the same word',
+    questions: {
+      pick: {
+        type: 'choice' as const,
+        instructions: 'Pick a tag for cat',
+        criteria: { animal: null, other: null },
+      },
+    },
+  };
+  const sent: string[] = [];
+  let recover = true;
+  try {
+    globalThis.fetch = async (url, init) => {
+      assert.equal(url, 'https://api.typesafe.ai/v1/systemone');
+      sent.push(String(init?.body));
+      if (!recover || sent.length === 1)
+        return new Response('<html>Origin failed</html>', {
+          status: 520,
+          headers: { 'Retry-After': '3' },
+        });
+      return Response.json({
+        ...answer(payload.questions, () => ({ animal: 1 })),
+        model: 'jev-latest',
+      });
+    };
+    const operation = async () => {
+      const response = await POST(
+        new Request('https://lab.example/api/decision', {
+          method: 'POST',
+          headers: { 'x-typesafe-key': 'fake-unit-test-key' },
+          body: JSON.stringify(payload),
+        }),
+      );
+      const data = (await response.json()) as DecisionResponse & {
+        error: string;
+        retryAfterMs: number;
+      };
+      if (!response.ok)
+        throw new ProviderError(data.error, response.status, data.retryAfterMs);
+      return data;
+    };
+    const waits: number[] = [];
+    const result = await retryThrottled(
+      operation,
+      new AbortController().signal,
+      () => {},
+      async (ms) => {
+        waits.push(ms);
+      },
+    );
+    assert.equal(result.answers.pick.choice, 'animal');
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0], sent[1]);
+    assert.equal(JSON.parse(sent[0]).model, 'jev-latest');
+    assert.deepEqual(waits, [3000]);
+    recover = false;
+    sent.length = 0;
+    waits.length = 0;
+    await assert.rejects(
+      retryThrottled(
+        operation,
+        new AbortController().signal,
+        () => {},
+        async (ms) => {
+          waits.push(ms);
+        },
+      ),
+      (e: unknown) => e instanceof ProviderError && e.status === 520,
+    );
+    assert.equal(sent.length, 4);
+    assert.deepEqual(waits, [3000, 3000, 4000]);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test('transient timeouts retry but explicit cancellation never retries', async () => {
   let calls = 0;
   const controller = new AbortController();

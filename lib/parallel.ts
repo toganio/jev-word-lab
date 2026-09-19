@@ -112,7 +112,7 @@ export async function retryThrottled<T>(
     } catch (error) {
       if (
         !(error instanceof ProviderError) ||
-        ![408, 429, 503, 504, 529].includes(error.status) ||
+        ![408, 429, 503, 504, 520, 529].includes(error.status) ||
         attempt >= 3 ||
         signal.aborted
       )

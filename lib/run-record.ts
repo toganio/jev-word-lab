@@ -1,6 +1,6 @@
 import type { Message, Stats, Step } from './types';
 import { MAX_CONCURRENCY } from './parallel';
-export const APP_VERSION = 'jev-lab-7-pipeline';
+export const APP_VERSION = 'jev-lab-8-gateway-retry';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'error';
 export type RecordedOperation = {
   id: number;
