@@ -1,5 +1,6 @@
 import type { Message, Stats, Step } from './types';
-export const APP_VERSION = 'jev-lab-6-measured';
+import { MAX_CONCURRENCY } from './parallel';
+export const APP_VERSION = 'jev-lab-7-pipeline';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'error';
 export type RecordedOperation = {
   id: number;
@@ -91,7 +92,7 @@ export function sanitizeRecord(input: any): RunRecord {
       ),
       repetitionGuard: settings.repetitionGuard,
       ...(typeof settings.parallelism === 'number'
-        ? { parallelism: num(settings.parallelism, 96) }
+        ? { parallelism: num(settings.parallelism, MAX_CONCURRENCY) }
         : {}),
     },
     conversation: arr(input.conversation, 10, (m) => {
@@ -137,7 +138,7 @@ export function sanitizeRecord(input: any): RunRecord {
       ),
       inputTokens: num(usage.inputTokens),
       outputTokens: num(usage.outputTokens),
-      words: num(usage.words, 1000),
+      words: num(usage.words, input.kind === 'classification' ? 100000 : 1000),
       startedAt: num(usage.startedAt),
       elapsedMs: num(usage.elapsedMs),
     },

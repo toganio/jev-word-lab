@@ -56,10 +56,12 @@ import {
 } from '@/lib/category-file';
 import {
   DEFAULT_CONCURRENCY,
+  TARGET_INPUT_TPS,
   ProviderError,
   retryThrottled,
 } from '@/lib/parallel';
 import { CategoryCheckpoints } from '@/lib/checkpoints';
+import { fetchJson } from '@/lib/request';
 import { generate } from '@/lib/engine';
 import { RunRecorder, type SaveStatus } from '@/lib/recorder';
 import { APP_VERSION, type RunStatus } from '@/lib/run-record';
@@ -173,11 +175,12 @@ export default function Home() {
   const [categoryError, setCategoryError] = useState('');
   const pendingCategories = useRef<CategoryMap | null>(null);
   const preparationActive = useRef(false);
+  const classificationStartCells = useRef(0);
   const [parallelism, setParallelism] = useState(String(DEFAULT_CONCURRENCY));
   const [activeRequests, setActiveRequests] = useState(0);
   const [throughput, setThroughput] = useState({
     tokensPerSecond: 0,
-    targetTokensPerSecond: 237500,
+    targetTokensPerSecond: TARGET_INPUT_TPS,
   });
   const sessionRef = useRef<string | null>(null);
   const sourceHash = useRef('');
@@ -295,12 +298,15 @@ export default function Home() {
         async () => {
           const timeout = AbortSignal.timeout(30000);
           try {
-            const r = await fetch('/api/categories', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body,
-              signal: timeout,
-            });
+            const { response: r } = await fetchJson(
+              '/api/categories',
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body,
+              },
+              timeout,
+            );
             if (!r.ok)
               throw new ProviderError(
                 'Kategori kaydı başarısız; sonuçlar bellekte korunuyor.',
@@ -533,16 +539,18 @@ export default function Home() {
     logOperation(operation);
     const timeout = AbortSignal.timeout(30000);
     try {
-      const r = await fetch('/api/decision', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-typesafe-key': keyRef.current.trim(),
+      const { response: r, data } = await fetchJson(
+        '/api/decision',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-typesafe-key': keyRef.current.trim(),
+          },
+          body: JSON.stringify({ state, questions }),
         },
-        body: JSON.stringify({ state, questions }),
-        signal: AbortSignal.any([signal, timeout]),
-      });
-      const data = await r.json();
+        AbortSignal.any([signal, timeout]),
+      );
       if (!r.ok)
         throw new ProviderError(
           data &&
@@ -756,7 +764,10 @@ export default function Home() {
     busy.current = true;
     setClassifying(true);
     preparationActive.current = true;
-    setThroughput({ tokensPerSecond: 0, targetTokensPerSecond: 237500 });
+    setThroughput({
+      tokensPerSecond: 0,
+      targetTokensPerSecond: TARGET_INPUT_TPS,
+    });
     setError('');
     setOperations([]);
     setMonitorTab('monitor');
@@ -765,6 +776,7 @@ export default function Home() {
     statsRef.current = { ...INITIAL, startedAt: Date.now() };
     setStats(statsRef.current);
     const restored = { ...overrides, ...pendingCategories.current };
+    classificationStartCells.current = scannedCells(restored);
     const words = dict.words
       .slice(0, Number(limit) || dict.count)
       .filter(([w]) => !isComplete(restored[w]))
@@ -1037,8 +1049,10 @@ export default function Home() {
                 ['8', 'En fazla 8'],
                 ['16', 'En fazla 16'],
                 ['32', 'En fazla 32'],
-                ['64', 'En fazla 64 · ölçülen hızlı ayar'],
+                ['64', 'En fazla 64'],
                 ['96', 'En fazla 96'],
+                ['128', 'En fazla 128'],
+                ['256', 'En fazla 256 · ölçülen hızlı ayar'],
               ]}
             />
             <Button
@@ -1090,8 +1104,13 @@ export default function Home() {
           </p>
           {classifying && stats.elapsedMs > 0 && (
             <p>
-              {(stats.words / (stats.elapsedMs / 1000)).toFixed(1)} tamamlanan
-              kelime/sn · bu çalışmanın ortalaması
+              {(
+                Math.max(0, scannedCount - classificationStartCells.current) /
+                AXES.length /
+                (stats.elapsedMs / 1000)
+              ).toFixed(1)}{' '}
+              kelime/sn eşdeğeri · 36 boyut bir kelime sayılır · bu turda{' '}
+              {number(stats.words)} kelime tamamen tamamlandı
             </p>
           )}
           <p>

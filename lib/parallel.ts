@@ -1,8 +1,10 @@
-/** Account limits are dynamic; 95% of the documented TPS and 19 requests/second are local ceilings.
+/** Measured local targets, not an account quota. Shared backoff adapts to dynamic limits.
  * https://docs.typesafe.ai/models and https://docs.typesafe.ai/api#handling-rate-limits
  */
-export const DEFAULT_CONCURRENCY = 64;
-export const MAX_CONCURRENCY = 96;
+export const DEFAULT_CONCURRENCY = 256;
+export const MAX_CONCURRENCY = 256;
+export const TARGET_INPUT_TPS = 350000;
+export const TARGET_REQUESTS_PER_SECOND = 20;
 export class ProviderError extends Error {
   constructor(
     message: string,
@@ -60,7 +62,7 @@ export class RequestPacer {
       tokensPerSecond: Math.round(
         this.samples.reduce((n, s) => n + s.tokens, 0) / 5,
       ),
-      targetTokensPerSecond: Math.round(237500 * this.scale),
+      targetTokensPerSecond: Math.round(TARGET_INPUT_TPS * this.scale),
     };
   }
   constructor(
@@ -89,8 +91,8 @@ export class RequestPacer {
         this.next =
           this.now() +
           Math.max(
-            1000 / (19 * this.scale),
-            (estimatedTokens / (237500 * this.scale)) * 1000,
+            1000 / (TARGET_REQUESTS_PER_SECOND * this.scale),
+            (estimatedTokens / (TARGET_INPUT_TPS * this.scale)) * 1000,
           );
       });
     this.tail = task;

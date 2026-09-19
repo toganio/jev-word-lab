@@ -1,4 +1,5 @@
 import { validateRequest, validateResponse } from '../../../lib/protocol';
+import { withAbort } from '../../../lib/request';
 export async function POST(request: Request) {
   const headers = {
     'Cache-Control': 'no-store',
@@ -25,19 +26,27 @@ export async function POST(request: Request) {
     return fail('Geçersiz seçim isteği. Her soru 2–255 seçenek içermeli.');
   }
   try {
-    const response = await fetch('https://api.typesafe.ai/v1/systemone', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'jev-latest',
-        state: body.state,
-        questions: body.questions,
-      }),
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(25000)]),
-    });
+    const signal = AbortSignal.any([
+      request.signal,
+      AbortSignal.timeout(25000),
+    ]);
+    const response = await withAbort(
+      () =>
+        fetch('https://api.typesafe.ai/v1/systemone', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${key}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'jev-latest',
+            state: body.state,
+            questions: body.questions,
+          }),
+          signal,
+        }),
+      signal,
+    );
     if (!response.ok) {
       const messages: Record<number, string> = {
         401: 'API anahtarı kabul edilmedi. TypeSafe anahtarını kontrol et.',
@@ -65,7 +74,7 @@ export async function POST(request: Request) {
         { status: response.status, headers },
       );
     }
-    const data = await response.json();
+    const data = await withAbort(() => response.json(), signal);
     validateResponse(data, body.questions);
     if (!/^jev(?:[-.:]|$)/i.test(data.model))
       return fail(

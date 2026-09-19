@@ -410,6 +410,15 @@ function recordFixture(): RunRecord {
     },
   };
 }
+test('full dictionary classification logs accept measured parallelism and more than 1000 completed words', () => {
+  const record = recordFixture();
+  record.kind = 'classification';
+  record.settings.parallelism = 256;
+  record.usage.words = dictionary.count;
+  assert.equal(sanitizeRecord(record).usage.words, dictionary.count);
+  record.kind = 'conversation';
+  assert.throws(() => sanitizeRecord(record));
+});
 test('saved snapshots strip API keys, headers and unknown fields recursively', () => {
   const fixture = recordFixture();
   const secret = 'never-store-this-api-key';
@@ -681,6 +690,7 @@ test('prediction requires complete coverage and exposes the same word in several
 
 import {
   RequestPacer,
+  TARGET_INPUT_TPS,
   ProviderError,
   retryThrottled,
   abortableDelay,
@@ -808,11 +818,11 @@ test('shared pacing adapts to real token use and delays all workers after thrott
     pacer.acquire(100000, signal),
     pacer.acquire(100000, signal),
   ]);
-  assert.ok(now >= (50000 / 237500) * 1000);
+  assert.ok(now >= (50000 / TARGET_INPUT_TPS) * 1000);
   pacer.observe(100000, 20000);
   assert.equal(pacer.telemetry().tokensPerSecond, 4000);
   pacer.pause(5000);
-  assert.ok(pacer.telemetry().targetTokensPerSecond < 237500);
+  assert.ok(pacer.telemetry().targetTokensPerSecond < TARGET_INPUT_TPS);
   const before = now;
   await pacer.acquire(100000, signal);
   assert.ok(now - before >= 5000);
@@ -890,7 +900,7 @@ test('checkpoint batching coalesces parallel saves, stays bounded and acknowledg
   const queue = new CategoryCheckpoints(async (batch) => {
     writes++;
     active++;
-    assert.equal(active, 1);
+    assert.ok(active <= 2);
     assert.ok(Object.keys(batch).length <= 100);
     await new Promise((resolve) => setTimeout(resolve, 2));
     Object.assign(stored, batch);
@@ -1026,4 +1036,189 @@ test('dimension cohorts merge concurrent axes without lost cells and preserve al
   console.log(
     `Dimension cohort 96-word sample: ${calls} requests, ${writes} database writes, ${bytes} serialized bytes`,
   );
+});
+
+test('interleaved word sets coalesce without delaying or losing the newest axes', async () => {
+  const left = dictionary.words.slice(0, 96).map(([w]) => w);
+  const right = dictionary.words.slice(96, 192).map(([w]) => w);
+  const snapshot = (words: string[], cells: number) =>
+    Object.fromEntries(
+      words.map((w) => [w, AXES.map((_, i) => (i < cells ? 1 : 0))]),
+    );
+  const writes: CategoryMap[] = [];
+  const checkpoints = new CategoryCheckpoints(async (batch) => {
+    writes.push(batch);
+  });
+  await Promise.all([
+    checkpoints.save(snapshot(left, 1)),
+    checkpoints.save(snapshot(right, 1)),
+    checkpoints.save(snapshot(left, 2)),
+    checkpoints.save(snapshot(right, 2)),
+  ]);
+  assert.equal(writes.length, 2);
+  assert.ok(writes.every((batch) => Object.keys(batch).length === 96));
+  assert.ok(
+    writes.every((batch) =>
+      Object.values(batch).every((a) => a.filter(Boolean).length === 2),
+    ),
+  );
+});
+test('cancelling a dimension cohort settles every in-flight request', async () => {
+  let active = 0,
+    calls = 0;
+  const c = new AbortController();
+  const task = prepareCategories(
+    dictionary.words.slice(0, 96).map(([w]) => w),
+    {},
+    async (_state, qs, signal) => {
+      active++;
+      calls++;
+      try {
+        await abortableDelay(100, signal);
+        return answer(qs, (_id, q) => ({ [Object.keys(q.criteria)[0]]: 1 }));
+      } finally {
+        active--;
+      }
+    },
+    c.signal,
+    () => {},
+    { concurrency: 8, pacer: unpaced },
+  );
+  await new Promise((r) => setTimeout(r, 5));
+  c.abort();
+  await assert.rejects(task);
+  assert.equal(active, 0);
+  assert.equal(calls, 8);
+});
+
+test('three cohorts overlap while respecting a shared odd concurrency ceiling', async () => {
+  const words = dictionary.words.slice(0, 576).map(([w]) => w);
+  const output: CategoryMap = {};
+  let active = 0,
+    peak = 0;
+  const started = new Set<number>();
+  await prepareCategories(
+    words,
+    {},
+    async (_state, qs, signal) => {
+      active++;
+      peak = Math.max(peak, active);
+      const word = JSON.parse(
+        Object.values(qs)[0].instructions.match(/tags apply to ("[^"]+")/)![1],
+      );
+      started.add(Math.floor(words.indexOf(word) / 192));
+      await abortableDelay(1, signal);
+      active--;
+      return answer(qs, (_id, q) => ({ [Object.keys(q.criteria)[0]]: 1 }));
+    },
+    new AbortController().signal,
+    async (batch) => {
+      await new Promise((r) => setTimeout(r, 1));
+      for (const [word, a] of Object.entries(batch)) {
+        if (
+          a.filter(Boolean).length >=
+          (output[word]?.filter(Boolean).length || 0)
+        )
+          output[word] = a;
+      }
+    },
+    { concurrency: 5, pacer: unpaced },
+  );
+  assert.equal(peak, 5);
+  assert.equal(active, 0);
+  assert.equal(started.size, 3);
+  assert.ok(words.every((w) => isComplete(output[w])));
+});
+
+test('storage overlaps disjoint words but serializes successive snapshots of one word', async () => {
+  const events: string[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let begin!: () => void;
+  const began = new Promise<void>((resolve) => (begin = resolve));
+  const queue = new CategoryCheckpoints(async (batch) => {
+    const name = Object.keys(batch).join(',');
+    const version = batch.a?.[0] || 0;
+    events.push(`start:${name}:${version}`);
+    if (batch.a && version === 1) {
+      begin();
+      await held;
+    }
+    events.push(`done:${name}:${version}`);
+  });
+  const first = queue.save({ a: [1] });
+  await began;
+  const second = queue.save({ a: [2] });
+  const separate = queue.save({ b: [1] });
+  await separate;
+  assert.ok(!events.includes('start:a:2'));
+  release();
+  await Promise.all([first, second]);
+  assert.ok(events.indexOf('done:a:1') < events.indexOf('start:a:2'));
+  assert.ok(events.indexOf('done:b:0') < events.indexOf('done:a:1'));
+});
+
+import { fetchJson, withAbort } from '../lib/request';
+test('HTML gateway errors preserve status for retries while malformed successes fail', async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      new Response('<html>Unavailable</html>', { status: 503 });
+    const result = await fetchJson(
+      'https://example.test',
+      {},
+      new AbortController().signal,
+    );
+    assert.equal(result.response.status, 503);
+    assert.equal(result.data, null);
+    globalThis.fetch = async () => new Response('<html>Invalid</html>');
+    await assert.rejects(
+      fetchJson('https://example.test', {}, new AbortController().signal),
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+test('request cancellation bounds a response body that never settles and does not start pre-cancelled work', async () => {
+  const controller = new AbortController();
+  let invoked = 0;
+  const pending = withAbort(async () => {
+    invoked++;
+    return new Promise<never>(() => {});
+  }, controller.signal);
+  await Promise.resolve();
+  controller.abort(new Error('bounded cancellation'));
+  await assert.rejects(pending, /bounded cancellation/);
+  assert.equal(invoked, 1);
+  assert.throws(
+    () =>
+      withAbort(async () => {
+        invoked++;
+        return 1;
+      }, controller.signal),
+    /bounded cancellation/,
+  );
+  assert.equal(invoked, 1);
+  const original = globalThis.fetch;
+  const bodyController = new AbortController();
+  let bodyStarted!: () => void;
+  const started = new Promise<void>((r) => (bodyStarted = r));
+  try {
+    globalThis.fetch = (async () => ({
+      json: () => {
+        bodyStarted();
+        return new Promise(() => {});
+      },
+    })) as unknown as typeof fetch;
+    const request = fetchJson(
+      'https://example.test',
+      {},
+      bodyController.signal,
+    );
+    await started;
+    bodyController.abort(new Error('body timeout'));
+    await assert.rejects(request, /body timeout/);
+  } finally {
+    globalThis.fetch = original;
+  }
 });
