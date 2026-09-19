@@ -1,4 +1,12 @@
 import type { Dictionary } from './types';
+import {
+  AXES,
+  AXIS_DEFINITIONS,
+  AXIS_LABELS,
+  selectedLabels,
+  isComplete,
+  type CategoryMap,
+} from './categories';
 export type WordNode = { kind: 'word'; word: string; label: string; count: 1 };
 export type GroupNode = {
   kind: 'group';
@@ -65,9 +73,22 @@ export function categoryLabel(id: string) {
 function wordNode(word: string): WordNode {
   return { kind: 'word', word, label: word, count: 1 };
 }
-function branch(words: string[], label: string, prefix = ''): GroupNode {
+function branch(
+  words: string[],
+  label: string,
+  prefix = '',
+  cache?: Map<string, WordNode>,
+): GroupNode {
+  const leaf = (w: string) => {
+    let n = cache?.get(w);
+    if (!n) {
+      n = wordNode(w);
+      cache?.set(w, n);
+    }
+    return n;
+  };
   let children: Node[];
-  if (words.length <= LEAF_SIZE) children = words.map(wordNode);
+  if (words.length <= LEAF_SIZE) children = words.map(leaf);
   else {
     const buckets = new Map<string, string[]>();
     for (const w of words) {
@@ -78,8 +99,8 @@ function branch(words: string[], label: string, prefix = ''): GroupNode {
     }
     children = [...buckets].map(([p, ws]) =>
       ws.length === 1
-        ? wordNode(ws[0])
-        : branch(ws, `${label.split(' / ')[0]} / ${p}…`, p),
+        ? leaf(ws[0])
+        : branch(ws, `${label.split(' / ')[0]} / ${p}…`, p, cache),
     );
   }
   return {
@@ -124,6 +145,51 @@ export function commonWords(dict: Dictionary, limit: number): string[] {
     .filter(([, ids]) => ids.some((i) => dict.categories[i] === 'function'))
     .slice(0, 110)
     .map(([w]) => w);
+}
+/** All memberships come from Jev; unprepared words are never silently added. */
+export function buildPreparedTree(
+  dict: Dictionary,
+  limit: number,
+  prepared: CategoryMap,
+): GroupNode {
+  const rows = dict.words
+    .slice(0, limit || dict.count)
+    .filter(([word]) => isComplete(prepared[word]));
+  if (
+    rows.length < 2 ||
+    rows.length !== (limit ? Math.min(limit, dict.count) : dict.count)
+  )
+    throw new Error(
+      'Kelime tahmininden önce sözlüğün tamamını Jev ile kategorize et.',
+    );
+  const cache = new Map<string, WordNode>();
+  const children = AXES.map((axis, axisIndex) => {
+    const buckets = new Map<string, string[]>();
+    for (const [word] of rows) {
+      for (const id of selectedLabels(axis, prepared[word][axisIndex])) {
+        const words = buckets.get(id) || [];
+        words.push(word);
+        buckets.set(id, words);
+      }
+    }
+    const groups = [...buckets].map(([id, words]) =>
+      branch(words, `${axis}: ${id}`, '', cache),
+    );
+    return {
+      kind: 'group' as const,
+      label: `${axis} · ${AXIS_LABELS[axis]}`,
+      description: `Search by ${axis}. ${AXIS_DEFINITIONS[axisIndex].guidance} Groups: ${groups.map((g) => g.label).join('; ')}. Memberships can overlap. Use the conversation and current sentence to choose the relevant route.`,
+      count: rows.length,
+      children: groups,
+    };
+  });
+  return {
+    kind: 'group',
+    label: 'English dictionary',
+    description: 'Jev-prepared multidimensional category map',
+    count: rows.length,
+    children,
+  };
 }
 export function joinWords(words: string[]): string {
   let result = '';

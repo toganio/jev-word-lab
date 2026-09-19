@@ -2,7 +2,7 @@
 Usage: python3 scripts/build-dictionary.py /path/to/wordnet.zip
 Source: https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/wordnet.zip
 """
-import json, re, sys, zipfile
+import json, re, sys, zipfile, hashlib
 from pathlib import Path
 from collections import defaultdict
 z = zipfile.ZipFile(sys.argv[1])
@@ -40,3 +40,6 @@ d={'source':'Princeton WordNet 3.0 + function words','sourceUrl':'https://wordne
 (out/'words.txt').write_text('\n'.join(sorted(words))+'\n')
 (out/'WORDNET-LICENSE.txt').write_bytes(z.read('wordnet/LICENSE'))
 print(f'{len(rows):,} words; {len(ids)} categories; {(out/"dictionary.json").stat().st_size:,} bytes')
+
+raw=(out/'words.txt').read_bytes()
+Path('lib/dictionary-manifest.json').write_text(json.dumps({'sourceSha256':hashlib.sha256(raw).hexdigest(),'words':raw.decode().splitlines()},separators=(',',':')))

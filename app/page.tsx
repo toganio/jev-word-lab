@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Network,
   KeyRound,
@@ -30,8 +30,30 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { buildTree, commonWords, categoryLabel } from '@/lib/dictionary';
-import { generate, classifyWords } from '@/lib/engine';
+import {
+  buildPreparedTree,
+  commonWords,
+  categoryLabel,
+} from '@/lib/dictionary';
+import {
+  AXES,
+  AXIS_DEFINITIONS,
+  AXIS_LABELS,
+  CATEGORY_OPTIONS,
+  TAXONOMY_VERSION,
+  QUESTIONS_PER_REQUEST,
+  isComplete,
+  selectedLabels,
+  prepareCategories,
+  sanitizeCategories,
+  type CategoryMap,
+} from '@/lib/categories';
+import {
+  makeCategoryFile,
+  validateCategoryFile,
+  scannedCells,
+} from '@/lib/category-file';
+import { generate } from '@/lib/engine';
 import { RunRecorder, type SaveStatus } from '@/lib/recorder';
 import { APP_VERSION, type RunStatus } from '@/lib/run-record';
 import { validateResponse } from '@/lib/protocol';
@@ -44,6 +66,19 @@ import type {
   Step,
   Trace,
 } from '@/lib/types';
+type CategoryPage = {
+  version: string;
+  categories: CategoryMap;
+  nextCursor: string | null;
+  sourceSha256: string;
+  sessionId: string | null;
+  expectedCount: number;
+  expectedCells: number;
+  verifiedCount: number;
+  scannedCells: number;
+  missingCount: number;
+  complete: boolean;
+};
 type Operation = {
   id: number;
   label: string;
@@ -112,8 +147,8 @@ export default function Home() {
     [loadError, setLoadError] = useState('');
   const [repetitionGuard, setRepetitionGuard] = useState(true);
   const [prompt, setPrompt] = useState('How do I make a good cup of tea?');
-  const [limit, setLimit] = useState('0'),
-    [beam, setBeam] = useState('3'),
+  const limit = '0';
+  const [beam, setBeam] = useState('3'),
     [maxWords, setMaxWords] = useState('32'),
     [budget, setBudget] = useState('200');
   const [messages, setMessages] = useState<Message[]>([]),
@@ -125,9 +160,196 @@ export default function Home() {
     [error, setError] = useState('');
   const [stats, setStats] = useState<Stats>(INITIAL),
     [liveTrace, setLiveTrace] = useState<Trace | null>(null);
-  const [overrides, setOverrides] = useState<Record<string, string>>({}),
-    [classifyCount, setClassifyCount] = useState('240'),
+  const [overrides, setOverrides] = useState<CategoryMap>({}),
     [query, setQuery] = useState('');
+  const [categoriesLoading, setCategoriesLoading] = useState(true);
+  const [categoryError, setCategoryError] = useState('');
+  const pendingCategories = useRef<CategoryMap | null>(null);
+  const preparationActive = useRef(false);
+  const sessionRef = useRef<string | null>(null);
+  const sourceHash = useRef('');
+  const [coverage, setCoverage] = useState<{
+    expectedCount: number;
+    expectedCells: number;
+    verifiedCount: number;
+    scannedCells: number;
+    missingCount: number;
+    complete: boolean;
+    sessionId: string | null;
+  } | null>(null);
+  const [importing, setImporting] = useState(false);
+  const categoryGroups = useMemo(
+    () =>
+      Object.fromEntries(
+        AXES.map((axis, index) => {
+          const groups: Record<string, string[]> = {};
+          // Bounded preview; the downloadable file contains every word.
+          for (const [word, assignment] of Object.entries(overrides).slice(
+            0,
+            100,
+          )) {
+            for (const label of selectedLabels(axis, assignment[index]))
+              (groups[label] ||= []).push(word);
+          }
+          return [axis, groups];
+        }),
+      ) as Record<string, Record<string, string[]>>,
+    [overrides],
+  );
+  const preparedCount = useMemo(
+    () => dict?.words.filter(([w]) => isComplete(overrides[w])).length || 0,
+    [dict, overrides],
+  );
+  const scannedCount = useMemo(() => scannedCells(overrides), [overrides]);
+  const categoriesReady =
+    !categoriesLoading &&
+    !categoryError &&
+    !importing &&
+    !!dict &&
+    preparedCount === dict.count &&
+    coverage?.complete === true &&
+    !pendingCategories.current;
+  async function loadCategories() {
+    setCategoriesLoading(true);
+    setCategoryError('');
+    try {
+      const all: CategoryMap = {};
+      let cursor: string | null = null;
+      let session: string | null = null;
+      do {
+        const params = new URLSearchParams();
+        if (cursor) params.set('after', cursor);
+        if (session) params.set('session', session);
+        const response = await fetch(`/api/categories?${params}`);
+        if (!response.ok) throw new Error();
+        const data = (await response.json()) as CategoryPage;
+        if (data.version !== TAXONOMY_VERSION) throw new Error();
+        Object.assign(all, sanitizeCategories(data.categories));
+        session = data.sessionId;
+        sourceHash.current = data.sourceSha256;
+        setCoverage(data);
+        cursor = data.nextCursor;
+      } while (cursor);
+      sessionRef.current = session;
+      setOverrides(all);
+    } catch {
+      setCategoryError('Kayıtlı kategori oturumu yüklenemedi. Yeniden yükle.');
+    } finally {
+      setCategoriesLoading(false);
+    }
+  }
+  async function startCategorySession(fromFile = false) {
+    const response = await fetch('/api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'start',
+        version: TAXONOMY_VERSION,
+        sourceSha256: sourceHash.current,
+        sessionId: fromFile ? null : sessionRef.current,
+        origin: fromFile ? 'file' : 'jev',
+      }),
+    });
+    if (!response.ok) throw new Error('Kategorizasyon oturumu başlatılamadı.');
+    sessionRef.current = (
+      (await response.json()) as { sessionId: string }
+    ).sessionId;
+    setCoverage((old) =>
+      old ? { ...old, sessionId: sessionRef.current, complete: false } : old,
+    );
+  }
+  async function verifyCategorySession() {
+    const response = await fetch(
+      `/api/categories?status=1&session=${encodeURIComponent(sessionRef.current || '')}`,
+    );
+    if (!response.ok) throw new Error('Sözlüğün tam kapsamı doğrulanamadı.');
+    const data = (await response.json()) as CategoryPage;
+    setCoverage(data);
+    return data.complete === true;
+  }
+  async function saveCategories(categories: CategoryMap) {
+    const r = await fetch('/api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        version: TAXONOMY_VERSION,
+        sourceSha256: sourceHash.current,
+        sessionId: sessionRef.current,
+        categories,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok)
+      throw new Error(
+        'Kategori oturumu kaydedilemedi. Tamamlanan seçimler korundu; hazırlama tuşuyla yeniden dene.',
+      );
+  }
+  function downloadCategories() {
+    if (!dict || !sourceHash.current) return;
+    const file = makeCategoryFile(
+      overrides,
+      sourceHash.current,
+      dict.words.map(([w]) => w),
+    );
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(file)], { type: 'application/json' }),
+    );
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.complete
+      ? 'jev-category-map-36-complete.json'
+      : 'jev-category-map-36-partial.json';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function uploadCategories(file?: File) {
+    if (!file || !dict || busy.current || categoriesLoading) return;
+    busy.current = true;
+    setImporting(true);
+    setError('');
+    const c = new AbortController();
+    controller.current = c;
+    try {
+      if (file.size > 64000000) throw new Error('Dosya 64 MB sınırını aşıyor.');
+      const map = validateCategoryFile(
+        JSON.parse(await file.text()),
+        sourceHash.current,
+        dict.words.map(([w]) => w),
+      );
+      await startCategorySession(true);
+      setOverrides({});
+      const entries = Object.entries(map);
+      for (let i = 0; i < entries.length; i += 100) {
+        c.signal.throwIfAborted();
+        const batch = Object.fromEntries(entries.slice(i, i + 100));
+        pendingCategories.current = batch;
+        await saveCategories(batch);
+        pendingCategories.current = null;
+        setOverrides((old) => ({ ...old, ...batch }));
+        setPhase(
+          `Kategori dosyası yükleniyor: ${Math.min(i + 100, entries.length)} / ${entries.length}`,
+        );
+      }
+      const complete = await verifyCategorySession();
+      setPhase(
+        complete
+          ? 'Kategorize Dosyası Oluştu · bütün kelimeler ve 36 boyut doğrulandı.'
+          : 'Kısmi dosya yüklendi. Jev yalnızca eksik boyutları tarayacak.',
+      );
+    } catch (e) {
+      setError(
+        c.signal.aborted
+          ? 'Yükleme durduruldu. Kaydedilen bölüm oturumda korundu.'
+          : e instanceof Error
+            ? e.message
+            : 'Dosya yüklenemedi.',
+      );
+    } finally {
+      setImporting(false);
+      busy.current = false;
+      controller.current = null;
+    }
+  }
   const controller = useRef<AbortController | null>(null),
     statsRef = useRef(INITIAL),
     busy = useRef(false),
@@ -149,6 +371,7 @@ export default function Home() {
   }, []);
   useEffect(() => {
     loadDictionary();
+    void loadCategories();
     return () => controller.current?.abort();
   }, [loadDictionary]);
   const stop = useCallback(() => {
@@ -163,6 +386,8 @@ export default function Home() {
     messages,
     latestStep: steps.at(-1),
     dictionaryWords: dict?.count,
+    preparedWords: preparedCount,
+    categorySession: coverage,
     operations: operations.slice(-30),
     provider: 'TypeSafe',
     fallback: false,
@@ -207,7 +432,12 @@ export default function Home() {
           limit: Number(limit),
           beam: Number(beam),
           maxWords: Number(maxWords),
-          requestBudget: Number(budget),
+          requestBudget:
+            kind === 'classification'
+              ? Math.ceil(
+                  ((dict?.count || 0) * AXES.length) / QUESTIONS_PER_REQUEST,
+                )
+              : Number(budget),
           repetitionGuard,
         },
         conversation: conversation.slice(-10),
@@ -228,7 +458,10 @@ export default function Home() {
   }
   const evaluate: Evaluate = async (state, questions, signal) => {
     signal.throwIfAborted();
-    if (statsRef.current.requests >= Number(budget))
+    if (
+      !preparationActive.current &&
+      statsRef.current.requests >= Number(budget)
+    )
       throw new Error('API istek sınırına ulaşıldı. Kısmi cevap korundu.');
     updateStats({ requests: statsRef.current.requests + 1 });
     const id = ++operationId.current,
@@ -280,7 +513,7 @@ export default function Home() {
       validateResponse(data, questions);
       const summary =
         Object.entries(data.answers)
-          .slice(0, 3)
+          .slice(0, preparationActive.current ? 32 : 3)
           .map(([qid, a]) =>
             qid === 'next'
               ? `Seçilen: ${a.choice === '__END__' ? 'Cevabı bitir' : a.choice}`
@@ -288,10 +521,14 @@ export default function Home() {
                 ? (questions[qid].criteria[a.choice] || a.choice)
                     .split('Examples:')[0]
                     .slice(0, 100)
-                : a.choice,
+                : preparationActive.current
+                  ? `${(state as { targets?: { word: string; dimension: string }[] }).targets?.[Number(qid.slice(1))]?.word || qid} · ${(state as { targets?: { dimension: string }[] }).targets?.[Number(qid.slice(1))]?.dimension || ''}: ${questions[qid].criteria[a.choice] || a.choice}`
+                  : a.choice,
           )
           .join(' / ') +
-        (entries.length > 3 ? ` (+${entries.length - 3} sonuç)` : '');
+        (!preparationActive.current && entries.length > 3
+          ? ` (+${entries.length - 3} sonuç)`
+          : '');
       logOperation({
         ...operation,
         status: 'done',
@@ -343,7 +580,7 @@ export default function Home() {
         c.signal,
       );
       setConnected(true);
-      setPhase('Bağlantı hazır. İngilizce bir soru sor.');
+      setPhase('Bağlantı hazır. Önce Jev ile kategorileri hazırla.');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Bağlantı kurulamadı.');
       setConnected(false);
@@ -354,7 +591,14 @@ export default function Home() {
     }
   }
   async function run() {
-    if (busy.current || !connected || !dict || !prompt.trim()) return;
+    if (
+      busy.current ||
+      !connected ||
+      !dict ||
+      !prompt.trim() ||
+      !categoriesReady
+    )
+      return;
     busy.current = true;
     const c = new AbortController();
     controller.current = c;
@@ -377,10 +621,12 @@ export default function Home() {
     let outcome: RunStatus = 'completed',
       outcomeReason = '';
     try {
-      const root = buildTree(dict, Number(limit), overrides);
+      const root = buildPreparedTree(dict, Number(limit), overrides);
       const result = await generate({
         root,
-        common: commonWords(dict, Number(limit)),
+        common: commonWords(dict, Number(limit)).filter((w) =>
+          Object.hasOwn(overrides, w),
+        ),
         history,
         beam: Number(beam),
         maxWords: Number(maxWords),
@@ -443,9 +689,17 @@ export default function Home() {
     }
   }
   async function classify() {
-    if (busy.current || !dict || !connected) return;
+    if (
+      busy.current ||
+      !dict ||
+      !connected ||
+      categoriesLoading ||
+      categoryError
+    )
+      return;
     busy.current = true;
     setClassifying(true);
+    preparationActive.current = true;
     setError('');
     setOperations([]);
     setMonitorTab('monitor');
@@ -453,53 +707,63 @@ export default function Home() {
     controller.current = c;
     statsRef.current = { ...INITIAL, startedAt: Date.now() };
     setStats(statsRef.current);
-    const count = Number(classifyCount);
+    const restored = { ...overrides, ...pendingCategories.current };
     const words = dict.words
       .slice(0, Number(limit) || dict.count)
-      .filter(
-        ([w, ids]) =>
-          !Object.hasOwn(overrides, w) &&
-          !ids.some((i) => dict.categories[i] === 'function'),
-      )
-      .slice(0, count)
+      .filter(([w]) => !isComplete(restored[w]))
       .map(([w]) => w);
     let done = 0;
     beginRecording(
       'classification',
-      `${words.length} İngilizce kelimeyi sınıflandır`,
+      `${words.length} İngilizce kelimenin eksik boyutlarını 36 boyutlu şemayla tara (${TAXONOMY_VERSION})`,
       [],
     );
     let outcome: RunStatus = 'completed',
       outcomeReason = '';
     try {
+      await startCategorySession();
+      if (pendingCategories.current) {
+        await saveCategories(pendingCategories.current);
+        const recovered = pendingCategories.current;
+        setOverrides((old) => ({ ...old, ...recovered }));
+        pendingCategories.current = null;
+      }
       if (!words.length) {
+        if (!(await verifyCategorySession()))
+          throw new Error('Sözlüğün tam kapsamı henüz doğrulanamadı.');
+        outcomeReason = 'Bütün sözlük ve 36 boyut doğrulandı';
         setPhase(
           'Bu sözlükteki kelimeler zaten Jev tarafından sınıflandırıldı.',
         );
         return;
       }
-      await classifyWords(
+      await prepareCategories(
         words,
-        Object.fromEntries(
-          dict.categories.map((cat) => [cat, categoryLabel(cat)]),
-        ),
+        restored,
         evaluate,
         c.signal,
-        (result) => {
-          done += Object.keys(result).length;
+        async (result) => {
+          done += Object.values(result).filter(isComplete).length;
+          pendingCategories.current = result;
           recording.current?.patch({
-            answer: `${done} kelime sınıflandırıldı. Son grup: ${JSON.stringify(result)}`,
+            answer: `${done} tamamlanan kelime adımı; 36 boyutlu tarama sürüyor. Son grup: ${JSON.stringify(result)}`,
           });
           setOverrides((old) => ({ ...old, ...result }));
+          await saveCategories(result);
+          pendingCategories.current = null;
           setPhase(
-            `Jev ${done} / ${words.length} kelimeyi kategorilere ayırdı.`,
+            `Jev bütün sözlüğün 36 boyutunu tarıyor; tamamlanan sonuçlar kaydedildi.`,
           );
         },
       );
+      if (!(await verifyCategorySession()))
+        throw new Error(
+          'Tarama bitti ancak bütün kelimeler henüz doğrulanamadı. Kalanlardan devam et.',
+        );
       setPhase(
-        `${done} kelime Jev tarafından sınıflandırıldı. Yeni gruplar sonraki denemede kullanılacak.`,
+        'Kategorize Dosyası Oluştu · bütün kelimeler ve 36 boyut doğrulandı.',
       );
-      outcomeReason = `${done} kelime sınıflandırıldı`;
+      outcomeReason = `${done} kelime sınıflandırıldı; bütün sözlük hazır`;
     } catch (e) {
       outcome = c.signal.aborted ? 'stopped' : 'error';
       outcomeReason = c.signal.aborted
@@ -517,6 +781,7 @@ export default function Home() {
       recording.current = null;
       await recorder?.finish(outcome, outcomeReason);
       setClassifying(false);
+      preparationActive.current = false;
       busy.current = false;
       controller.current = null;
     }
@@ -541,7 +806,9 @@ export default function Home() {
       operations,
       provider: 'TypeSafe',
       fallback: false,
-      jevCategories: overrides,
+      taxonomyVersion: TAXONOMY_VERSION,
+      categoryDefinitions: CATEGORY_OPTIONS,
+      categorySessionId: sessionRef.current,
     };
     const url = URL.createObjectURL(
       new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }),
@@ -552,7 +819,7 @@ export default function Home() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
-  const isBusy = running || classifying || checking;
+  const isBusy = importing || running || classifying || checking;
   const shownStep = selected < 0 ? steps.at(-1) : steps[selected];
   const activeCount = dict ? Number(limit) || dict.count : 0;
   const searchRows =
@@ -670,6 +937,119 @@ export default function Home() {
             <Button onClick={loadDictionary}>Yeniden yükle</Button>
           </div>
         )}
+        <div className="category-preparation">
+          <div>
+            <strong>1. Kategorize Dosyası Oluştur</strong>
+            <p>
+              36 boyut · çoklu etiketler · {number(preparedCount)} /{' '}
+              {number(dict?.count || 0)} kelime tamamen tarandı.
+            </p>
+          </div>
+          <div className="classify-controls">
+            <Button
+              onClick={() => void classify()}
+              disabled={
+                isBusy ||
+                !connected ||
+                !dict ||
+                categoriesLoading ||
+                !!categoryError ||
+                categoriesReady
+              }
+            >
+              <FlaskConical size={15} />
+              {classifying
+                ? 'Jev bütün sözlüğü kategorize ediyor…'
+                : categoriesReady
+                  ? 'Kategorizasyon tamamlandı'
+                  : scannedCount
+                    ? 'Jev ile kategorizasyona devam et'
+                    : 'Kategorize Dosyası Oluştur · Jev'}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setMonitorTab('dictionary')}
+            >
+              Kategori metnini gör
+            </Button>
+          </div>
+          <p>
+            Toplam {number(dict?.count || 0)} kelime. Kalan hazırlık yaklaşık{' '}
+            {number(
+              Math.ceil(
+                ((dict?.count || 0) * AXES.length - scannedCount) /
+                  QUESTIONS_PER_REQUEST,
+              ),
+            )}{' '}
+            TypeSafe isteği gerektirir (36 boyutlu tarama) ve API kullanımına
+            yansır. Bu uzun işlem sırasında sayfayı açık tut. Durdurur veya
+            kapatırsan kaydedilen kelimelerden devam edilir.
+          </p>
+          <p>
+            Kelime tahmini tüm sözlük tamamlanınca açılır. Aşağıdaki istek
+            sınırı yalnızca kelime tahmini içindir.
+          </p>
+          <p>
+            {number(scannedCount)} / {number((dict?.count || 0) * AXES.length)}{' '}
+            boyut incelemesi · {number((dict?.count || 0) - preparedCount)}{' '}
+            eksik kelime.
+          </p>
+          <p>
+            {coverage?.sessionId
+              ? `Kaydedilen oturum: ${coverage.sessionId.slice(0, 8)}`
+              : 'İlk hazırlamada kalıcı bir oturum oluşturulur.'}
+          </p>
+          {categoriesReady && (
+            <p role="status">
+              <strong>
+                Kategorize Dosyası Oluştu — %100 kapsam doğrulandı.
+              </strong>{' '}
+              Her kelime 36 boyutta tarandı. Bu, dilbilimsel doğruluğun %100
+              olduğu anlamına gelmez; belirsiz ve uygulanamaz sonuçlar dosyada
+              açıkça yer alır.
+            </p>
+          )}
+          <div className="classify-controls">
+            <Button
+              variant="outline"
+              onClick={downloadCategories}
+              disabled={!scannedCount || isBusy || categoriesLoading}
+            >
+              <Download size={16} />
+              {categoriesReady
+                ? 'Kategori dosyasını indir'
+                : 'Kısmi dosyayı indir'}
+            </Button>
+            <label className="category-upload">
+              Kategori dosyası yükle
+              <Input
+                type="file"
+                accept=".json,application/json"
+                disabled={
+                  isBusy || !dict || categoriesLoading || !!categoryError
+                }
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  void uploadCategories(file);
+                }}
+              />
+            </label>
+          </div>
+          <p>
+            Dosya yüklemek Jev çağrısı yapmaz. Sözlük ve şema doğrulanır; eksik
+            taramalar varsa hazırlama tuşuyla devam edilir.
+          </p>
+          {categoriesLoading && <p>Kaydedilmiş kategoriler yükleniyor…</p>}
+          {categoryError && (
+            <p role="alert">
+              {categoryError}{' '}
+              <Button variant="outline" onClick={() => void loadCategories()}>
+                Yeniden yükle
+              </Button>
+            </p>
+          )}
+        </div>
         <div className="repetition-control">
           <Switch
             id="repeat-guard"
@@ -685,22 +1065,6 @@ export default function Home() {
           </span>
         </div>
         <div className="experiment-settings">
-          <Picker
-            label="Kelime havuzu"
-            value={limit}
-            onChange={setLimit}
-            disabled={isBusy}
-            options={[
-              [
-                '0',
-                dict
-                  ? `Tüm sözlük · ${number(dict.count)}`
-                  : 'Sözlük yükleniyor…',
-              ],
-              ['5000', 'İlk 5.000 kelime'],
-              ['15000', 'İlk 15.000 kelime'],
-            ]}
-          />
           <Picker
             label="Açık tutulan yollar"
             value={beam}
@@ -724,7 +1088,7 @@ export default function Home() {
             ]}
           />
           <Picker
-            label="API istek sınırı"
+            label="Kelime tahmini istek sınırı"
             value={budget}
             onChange={setBudget}
             disabled={isBusy}
@@ -844,9 +1208,11 @@ export default function Home() {
                     ? 'Sözlük yükleniyor…'
                     : !connected
                       ? 'Önce API anahtarını bağla.'
-                      : 'Ctrl / ⌘ + Enter ile başlat'}
+                      : !categoriesReady
+                        ? `Önce bütün sözlüğü kategorize et (${preparedCount}/${dict.count}).`
+                        : `${preparedCount} hazırlanmış kelime · Ctrl / ⌘ + Enter`}
                 </span>
-                {running || classifying ? (
+                {running || classifying || importing ? (
                   <Button variant="destructive" onClick={stop}>
                     <Square size={14} />
                     Durdur
@@ -854,9 +1220,15 @@ export default function Home() {
                 ) : (
                   <Button
                     onClick={() => void run()}
-                    disabled={isBusy || !connected || !dict || !prompt.trim()}
+                    disabled={
+                      isBusy ||
+                      !connected ||
+                      !dict ||
+                      !prompt.trim() ||
+                      !categoriesReady
+                    }
                   >
-                    Denemeyi başlat <ArrowRight size={16} />
+                    2. Kelime tahminini başlat <ArrowRight size={16} />
                   </Button>
                 )}
               </div>
@@ -1100,36 +1472,56 @@ export default function Home() {
                     </a>
                   </div>
                   <p className="dictionary-copy">
-                    Başlangıç grupları WordNet’in{' '}
-                    {dict?.categories.length || 46} sözlük kategorisinden gelir.
-                    Jev’in kendi sınıflandırmasını da deneyebilirsin.
+                    Sözlük WordNet’ten gelir. 36 boyutta 216 etiket ve ayrıca
+                    uygulanamaz / belirsiz seçenekleri sunulur; her kelimenin 36
+                    boyuttaki etiketlerini Jev seçer. Kelime tahmini ancak bütün
+                    sözlük hazırlandıktan sonra açılır.
                   </p>
-                  <div className="classify-controls">
-                    <Picker
-                      label="Jev’in sınıflandıracağı kelimeler"
-                      value={classifyCount}
-                      onChange={setClassifyCount}
-                      disabled={isBusy}
-                      options={[
-                        ['240', 'Sıradaki 240 kelime'],
-                        ['960', 'Sıradaki 960 kelime'],
-                        ['4800', 'Sıradaki 4.800 kelime'],
-                      ]}
-                    />
-                    <Button
-                      variant="outline"
-                      onClick={() => void classify()}
-                      disabled={isBusy || !connected || !dict}
-                    >
-                      <FlaskConical size={15} />
-                      Jev ile kategorile
-                    </Button>
-                  </div>
                   <p className="dictionary-copy">
                     {number(Object.keys(overrides).length)} kelime Jev
-                    tarafından gruplandı. Sonuçlar bu oturumda tutulur; JSON
-                    çıktısına dahil edilir.
+                    tarafından 36 boyutta inceleniyor ve özel sitede saklanıyor.
+                    Bir kelime aynı boyutta birden fazla etiket alabilir.
+                    Aşağıdaki gruplar ilk 100 kayıtlı kelimeden örnektir; bütün
+                    sonuçlar dosyada bulunur.
                   </p>
+                  <details className="category-map">
+                    <summary>
+                      Jev’in hazırladığı kategori metni ve kelime grupları
+                    </summary>
+                    {!preparedCount && (
+                      <p>Henüz kategori haritası hazırlanmadı.</p>
+                    )}
+                    {AXES.map((axis) => (
+                      <section key={axis}>
+                        <h3>{AXIS_LABELS[axis]}</h3>
+                        <p>
+                          {
+                            AXIS_DEFINITIONS.find((d) => d.id === axis)!
+                              .guidance
+                          }
+                        </p>
+                        {Object.entries(CATEGORY_OPTIONS[axis]).map(
+                          ([id, description]) => {
+                            const members = categoryGroups[axis][id] || [];
+                            return (
+                              <details key={id}>
+                                <summary>
+                                  {description.split(':')[0]} · {members.length}
+                                </summary>
+                                <p>{description}</p>
+                                <p>
+                                  {members.slice(0, 100).join(', ')}
+                                  {members.length > 100
+                                    ? ` … (+${members.length - 100}; tamamı kategori dosyasında)`
+                                    : ''}
+                                </p>
+                              </details>
+                            );
+                          },
+                        )}
+                      </section>
+                    ))}
+                  </details>
                   <Input
                     aria-label="Sözlükte kelime ara"
                     placeholder="Kelime ara…"
@@ -1142,10 +1534,13 @@ export default function Home() {
                         <strong>{word}</strong>
                         <span>
                           {Object.hasOwn(overrides, word)
-                            ? `Jev · ${categoryLabel(overrides[word])}`
+                            ? AXES.map(
+                                (axis, index) =>
+                                  `${AXIS_LABELS[axis]}: ${selectedLabels(axis, overrides[word][index]).join(', ') || 'henüz taranmadı'}`,
+                              ).join(' · ')
                             : ids
                                 .map((i) => categoryLabel(dict!.categories[i]))
-                                .join(', ')}
+                                .join(', ') + ' · Jev henüz hazırlamadı'}
                         </span>
                       </div>
                     ))}

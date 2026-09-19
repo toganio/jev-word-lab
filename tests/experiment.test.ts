@@ -472,3 +472,201 @@ test('recorder saves final answer after an in-flight checkpoint without losing i
     globalThis.fetch = original;
   }
 });
+
+import {
+  AXES,
+  AXIS_DEFINITIONS,
+  QUESTIONS_PER_REQUEST,
+  NOT_APPLICABLE,
+  UNCERTAIN,
+  isComplete,
+  selectedLabels,
+  prepareCategories,
+  type CategoryMap,
+} from '../lib/categories';
+import { buildPreparedTree } from '../lib/dictionary';
+import { makeCategoryFile, validateCategoryFile } from '../lib/category-file';
+import {
+  EXPECTED_WORDS,
+  SOURCE_SHA256,
+  verifyCoverage,
+  validateDictionaryCategories,
+} from '../lib/category-coverage';
+
+test('36 dimensions support multiple labels, explicit uncertainty, and bounded valid choice requests', async () => {
+  assert.equal(AXES.length, 36);
+  assert.equal(new Set(AXES).size, 36);
+  const saved: CategoryMap = {};
+  const seen = new Set<string>();
+  await prepareCategories(
+    ['water', 'bank'],
+    {},
+    async (state, qs) => {
+      validateRequest({ state, questions: qs });
+      assert.ok(Object.keys(qs).length <= QUESTIONS_PER_REQUEST);
+      assert.ok(JSON.stringify({ state, questions: qs }).length < 180000);
+      const targets = (
+        state as { targets: { word: string; dimension: string }[] }
+      ).targets;
+      targets.forEach((t) => {
+        const key = `${t.word}:${t.dimension}`;
+        assert.ok(!seen.has(key));
+        seen.add(key);
+      });
+      const r = answer(qs, (_id, q) => {
+        assert.equal(Object.keys(q.criteria).length, 65);
+        return { '3': 1 };
+      });
+      validateResponse(r, qs);
+      return r;
+    },
+    new AbortController().signal,
+    (batch) => {
+      Object.assign(saved, batch);
+    },
+  );
+  assert.equal(seen.size, 72);
+  assert.ok(isComplete(saved.water));
+  assert.deepEqual(selectedLabels('type', saved.water[AXES.indexOf('type')]), [
+    'noun',
+    'verb',
+  ]);
+  assert.deepEqual(selectedLabels('type', NOT_APPLICABLE), ['not_applicable']);
+  assert.deepEqual(selectedLabels('type', UNCERTAIN), ['uncertain']);
+});
+test('an interrupted scan resumes missing dimensions without skipping the unfinished word or repeating paid work', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const saved: CategoryMap = {};
+  const evaluate: Evaluate = async (_state, qs) => {
+    calls++;
+    return answer(qs, () => ({ '1': 1 }));
+  };
+  await assert.rejects(
+    prepareCategories(
+      ['water', 'tea'],
+      {},
+      evaluate,
+      controller.signal,
+      (batch) => {
+        Object.assign(saved, batch);
+        controller.abort();
+      },
+    ),
+  );
+  assert.equal(calls, 1);
+  assert.equal(saved.water.filter(Boolean).length, 32);
+  assert.ok(!isComplete(saved.water));
+  const targets: string[] = [];
+  await prepareCategories(
+    ['water', 'tea'],
+    structuredClone(saved),
+    async (state, qs) => {
+      for (const t of (
+        state as { targets: { word: string; dimension: string }[] }
+      ).targets)
+        targets.push(`${t.word}:${t.dimension}`);
+      return evaluate(state, qs, new AbortController().signal);
+    },
+    new AbortController().signal,
+    (batch) => {
+      Object.assign(saved, batch);
+    },
+  );
+  assert.equal(targets.length, 40);
+  assert.ok(!targets.includes('water:meaning'));
+  assert.ok(isComplete(saved.water) && isComplete(saved.tea));
+  const before = calls;
+  await prepareCategories(
+    ['water', 'tea'],
+    saved,
+    evaluate,
+    new AbortController().signal,
+    () => {},
+  );
+  assert.equal(calls, before);
+});
+test('category files round trip with multiple labels and reject wrong dictionaries, schemas, and false completion', () => {
+  const a = AXES.map(() => 3);
+  const map = { water: a, tea: [...a] };
+  const words = ['water', 'tea'];
+  const file = JSON.parse(
+    JSON.stringify(makeCategoryFile(map, 'test-hash', words)),
+  );
+  assert.deepEqual(validateCategoryFile(file, 'test-hash', words), map);
+  assert.throws(() => validateCategoryFile(file, 'wrong-hash', words));
+  assert.throws(() =>
+    validateCategoryFile({ ...file, definitions: [] }, 'test-hash', words),
+  );
+  assert.throws(() =>
+    validateCategoryFile(
+      { ...file, categories: { water: a } },
+      'test-hash',
+      words,
+    ),
+  );
+  assert.throws(() =>
+    validateCategoryFile(
+      { ...file, categories: { ...map, water: [...a.slice(1), 999] } },
+      'test-hash',
+      words,
+    ),
+  );
+  const partial = makeCategoryFile(
+    { water: [1, ...AXES.slice(1).map(() => 0)] },
+    'test-hash',
+    words,
+  );
+  assert.equal(partial.complete, false);
+  assert.deepEqual(
+    validateCategoryFile(partial, 'test-hash', words),
+    partial.categories,
+  );
+});
+test('coverage verification checks every source word and dimension; one missing cell prevents 100 percent', () => {
+  assert.equal(EXPECTED_WORDS.length, dictionary.count);
+  assert.deepEqual(
+    new Set(EXPECTED_WORDS),
+    new Set(dictionary.words.map(([w]) => w)),
+  );
+  const map = Object.fromEntries(
+    EXPECTED_WORDS.map((w) => [w, AXES.map(() => UNCERTAIN)]),
+  );
+  const full = verifyCoverage(map);
+  assert.equal(full.complete, true);
+  assert.equal(full.scannedCells, dictionary.count * 36);
+  map[EXPECTED_WORDS[0]][35] = 0;
+  const partial = verifyCoverage(map);
+  assert.equal(partial.complete, false);
+  assert.equal(partial.missingCount, 1);
+  assert.equal(partial.scannedCells, full.scannedCells - 1);
+  assert.throws(() =>
+    validateDictionaryCategories({ zzzzinvalidwordzzzz: AXES.map(() => 1) }),
+  );
+});
+test('prediction requires complete coverage and exposes the same word in several Jev-selected paths', () => {
+  const dict: Dictionary = {
+    ...dictionary,
+    count: 2,
+    words: [
+      ['water', []],
+      ['tea', []],
+    ],
+  };
+  const map = { water: AXES.map(() => 3), tea: AXES.map(() => 1) };
+  assert.throws(() => buildPreparedTree(dict, 0, { water: map.water }));
+  const tree = buildPreparedTree(dict, 0, map);
+  assert.equal(tree.children.length, 36);
+  const type = tree.children[AXES.indexOf('type')] as GroupNode;
+  assert.equal(type.children.length, 2);
+  const noun = type.children[0] as GroupNode;
+  const verb = type.children[1] as GroupNode;
+  assert.equal(
+    noun.children.find((n) => n.label === 'water'),
+    verb.children.find((n) => n.label === 'water'),
+  );
+  assert.deepEqual(
+    new Set(type.children.map((n) => n.label)),
+    new Set(['type: noun', 'type: verb']),
+  );
+});
